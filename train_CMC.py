@@ -14,16 +14,19 @@ import socket
 import tensorboard_logger as tb_logger
 
 from torchvision import transforms, datasets
-from dataset import RGB2Lab, RGB2YCbCr
+from datasets.dataset import RGB2Lab, RGB2YCbCr
 from util import adjust_learning_rate, AverageMeter
 
 from models.alexnet import MyAlexNetCMC
 from models.resnet import MyResNetsCMC
+from models.i3d import MyI3DCMC
+from models.tsm import MyTSMCMC
 from NCE.NCEAverage import NCEAverage
 from NCE.NCECriterion import NCECriterion
 from NCE.NCECriterion import NCESoftmaxLoss
 
-from dataset import ImageFolderInstance
+from datasets.dataset import ImageFolderInstance
+from datasets.ntu import NTU
 
 try:
     from apex import amp, optimizers
@@ -42,7 +45,7 @@ def parse_option():
     parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
     parser.add_argument('--save_freq', type=int, default=10, help='save frequency')
     parser.add_argument('--batch_size', type=int, default=128, help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=18, help='num of workers to use')
+    parser.add_argument('--num_workers', type=int, default=8, help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=240, help='number of training epochs')
 
     # optimization
@@ -59,7 +62,7 @@ def parse_option():
                         help='path to latest checkpoint (default: none)')
 
     # model definition
-    parser.add_argument('--model', type=str, default='alexnet', choices=['alexnet',
+    parser.add_argument('--model', type=str, default='tsm', choices=['alexnet',
                                                                          'resnet50v1', 'resnet101v1', 'resnet18v1',
                                                                          'resnet50v2', 'resnet101v2', 'resnet18v2',
                                                                          'resnet50v3', 'resnet101v3', 'resnet18v3'])
@@ -73,9 +76,9 @@ def parse_option():
     parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet100', 'imagenet'])
 
     # specify folder
-    parser.add_argument('--data_folder', type=str, default=None, help='path to data')
-    parser.add_argument('--model_path', type=str, default=None, help='path to save model')
-    parser.add_argument('--tb_path', type=str, default=None, help='path to tensorboard')
+    parser.add_argument('--data_folder', type=str, default='/data0/xifan/NTU_RGBD_60/', help='path to data')
+    parser.add_argument('--model_path', type=str, default='checkpoints', help='path to save model')
+    parser.add_argument('--tb_path', type=str, default='logs', help='path to tensorboard')
 
     # add new views
     parser.add_argument('--view', type=str, default='Lab', choices=['Lab', 'YCbCr'])
@@ -126,28 +129,29 @@ def parse_option():
 
 def get_train_loader(args):
     """get the train loader"""
-    data_folder = os.path.join(args.data_folder, 'train')
+    # data_folder = os.path.join(args.data_folder, 'train')
 
-    if args.view == 'Lab':
-        mean = [(0 + 100) / 2, (-86.183 + 98.233) / 2, (-107.857 + 94.478) / 2]
-        std = [(100 - 0) / 2, (86.183 + 98.233) / 2, (107.857 + 94.478) / 2]
-        color_transfer = RGB2Lab()
-    elif args.view == 'YCbCr':
-        mean = [116.151, 121.080, 132.342]
-        std = [109.500, 111.855, 111.964]
-        color_transfer = RGB2YCbCr()
-    else:
-        raise NotImplemented('view not implemented {}'.format(args.view))
-    normalize = transforms.Normalize(mean=mean, std=std)
+    # if args.view == 'Lab':
+    #     mean = [(0 + 100) / 2, (-86.183 + 98.233) / 2, (-107.857 + 94.478) / 2]
+    #     std = [(100 - 0) / 2, (86.183 + 98.233) / 2, (107.857 + 94.478) / 2]
+    #     color_transfer = RGB2Lab()
+    # elif args.view == 'YCbCr':
+    #     mean = [116.151, 121.080, 132.342]
+    #     std = [109.500, 111.855, 111.964]
+    #     color_transfer = RGB2YCbCr()
+    # else:
+    #     raise NotImplemented('view not implemented {}'.format(args.view))
+    # normalize = transforms.Normalize(mean=mean, std=std)
 
-    train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(args.crop_low, 1.)),
-        transforms.RandomHorizontalFlip(),
-        color_transfer,
-        transforms.ToTensor(),
-        normalize,
-    ])
-    train_dataset = ImageFolderInstance(data_folder, transform=train_transform)
+    # train_transform = transforms.Compose([
+    #     transforms.RandomResizedCrop(224, scale=(args.crop_low, 1.)),
+    #     transforms.RandomHorizontalFlip(),ssss
+    #     color_transfer,
+    #     transforms.ToTensor(),
+    #     normalize,
+    # ])
+    # train_dataset = ImageFolderInstance(data_folder, transform=train_transform)
+    train_dataset = NTU(root_dir=args.data_folder, vid_len=(1, 1))
     train_sampler = None
 
     # train loader
@@ -164,7 +168,11 @@ def get_train_loader(args):
 
 def set_model(args, n_data):
     # set the model
-    if args.model == 'alexnet':
+    if args.model == 'i3d':
+        model = MyI3DCMC()
+    elif args.model == 'tsm':
+        model = MyTSMCMC(num_segments=1)
+    elif args.model == 'alexnet':
         model = MyAlexNetCMC(args.feat_dim)
     elif args.model.startswith('resnet'):
         model = MyResNetsCMC(args.model)
@@ -210,14 +218,15 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
     ab_prob_meter = AverageMeter()
 
     end = time.time()
-    for idx, (inputs, index) in enumerate(train_loader):
+    for idx, (inputs, label, index) in enumerate(train_loader):
         data_time.update(time.time() - end)
-        l, ab = inputs['rgb'], inputs['dep']
+        l, ab = inputs['rgb'], inputs['rgb']
+        # l, ab = inputs['rgb'], inputs['dep']
         bsz = l.size(0)
         l = l.float()
         ab = ab.float()
         if torch.cuda.is_available():
-            index = index.cuda(async=True)
+            index = index.cuda()
             l = l.cuda()
             ab = ab.cuda()
 
@@ -239,6 +248,7 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
                 scaled_loss.backward()
         else:
             loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-4, norm_type=2.0)
         optimizer.step()
 
         # ===================meters=====================
@@ -255,15 +265,15 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
         # print info
         if (idx + 1) % opt.print_freq == 0:
             print('Train: [{0}][{1}/{2}]\t'
-                  'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                #   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                #   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'loss {loss.val:.3f} ({loss.avg:.3f})\t'
                   'l_p {lprobs.val:.3f} ({lprobs.avg:.3f})\t'
                   'ab_p {abprobs.val:.3f} ({abprobs.avg:.3f})'.format(
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses, lprobs=l_prob_meter,
                    abprobs=ab_prob_meter))
-            print(out_l.shape)
+            # print(out_l.shape)
             sys.stdout.flush()
 
     return l_loss_meter.avg, l_prob_meter.avg, ab_loss_meter.avg, ab_prob_meter.avg

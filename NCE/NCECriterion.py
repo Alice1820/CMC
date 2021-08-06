@@ -8,11 +8,12 @@ class NCECriterion(nn.Module):
     """
     Eq. (12): L_{NCE}
     """
-    def __init__(self, n_data):
+    def __init__(self, n_data): 
         super(NCECriterion, self).__init__()
         self.n_data = n_data
 
     def forward(self, x):
+        print (x[0])
         bsz = x.shape[0]
         m = x.size(1) - 1
 
@@ -21,11 +22,11 @@ class NCECriterion(nn.Module):
 
         # loss for positive pair
         P_pos = x.select(1, 0)
-        log_D1 = torch.div(P_pos, P_pos.add(m * Pn + eps)).log_()
+        log_D1 = (torch.div(P_pos, P_pos.add(m * Pn + eps)) + eps).log_()
 
         # loss for K negative pair
         P_neg = x.narrow(1, 1, m)
-        log_D0 = torch.div(P_neg.clone().fill_(m * Pn), P_neg.add(m * Pn + eps)).log_()
+        log_D0 = (torch.div(P_neg.clone().fill_(m * Pn), P_neg.add(m * Pn + eps)) + eps).log_() 
 
         loss = - (log_D1.sum(0) + log_D0.view(-1, 1).sum(0)) / bsz
 

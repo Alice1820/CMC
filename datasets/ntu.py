@@ -9,14 +9,14 @@ from sklearn.utils import shuffle
 
 
 # %% tools
-def load_video(path, vid_len=24):
+def load_video(path, vid_len=8):
     cap = cv2.VideoCapture(path)
     num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    heigth = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     # Init the numpy array
-    video = np.zeros((vid_len, width, heigth, 3)).astype(np.float32)
+    video = np.zeros((vid_len, height, width, 3)).astype(np.float32)
     taken = np.linspace(0, num_frames, vid_len).astype(int)
 
     np_idx = 0
@@ -172,10 +172,10 @@ class AugCrop(object):
 # %%
 class NTU(Dataset):
 
-    def __init__(self, root_dir='',  # /home/juanma/Documents/Data/ROSE_Action
+    def __init__(self, root_dir='',  # /data0/xifan/NTU_RGBD_60
                  transform=None,
                  stage='train',
-                 vid_len=(8, 32),
+                 vid_len=(8, 8),
                  vid_dim=256,
                  vid_fr=30,
                  args=None):
@@ -195,11 +195,12 @@ class NTU(Dataset):
         elif stage == 'dev':  # smaller train datase for exploration
             subjects = [2, 5, 9, 14]
 
-        basename_rgb = os.path.join(root_dir, 'nturgbd_rgb/avi_310x256_30'))
-        basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/310x256_{1}')
+        basename_rgb = os.path.join(root_dir, 'nturgbd_rgb/avi_310x256_30') 
+        basename_dep = os.path.join(root_dir, 'nturgbd_depth_full/depth_f_310x256_30')
+        # basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/310x256_{1}')
         # basename_ske = os.path.join(root_dir, 'nturgbd_skeletons')
 
-        self.original_w, self.original_h = 1920, 1080
+        # self.original_w, self.original_h = 1920, 1080
         self.vid_len = vid_len
 
         self.rgb_list = []
@@ -210,7 +211,9 @@ class NTU(Dataset):
         self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if
                           f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
         self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if
-                          os.path.isdir(os.path.join(basename_dep, f)) and int(f[9:12]) in subjects]
+                          f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+        # self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if
+        #                   os.path.isdir(os.path.join(basename_dep, f)) and int(f[9:12]) in subjects]
         # self.ske_list += [os.path.join(basename_ske, f) for f in sorted(os.listdir(basename_ske)) if
         #                   f.split(".")[-1] == "skeleton" and int(f[9:12]) in subjects]
         self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename_rgb)) if
@@ -249,8 +252,9 @@ class NTU(Dataset):
         # skeleton = np.zeros([1])
 
         # if self.args.modality == "rgb" or self.args.modality == "both":
-        video = load_video(rgbpath)
-        maps = load_depth(deppath)
+        video = load_video(rgbpath, vid_len=self.vid_len[0])
+        # maps = load_depth(deppath)
+        maps = load_video(deppath, vid_len=self.vid_len[1])
         # if self.args.modality == "skeleton" or self.args.modality == "both":
         #     skeleton = get_3D_skeleton(skepath)
 
@@ -260,7 +264,7 @@ class NTU(Dataset):
         if self.transform:
             sample = self.transform(sample)
 
-        return sample, index
+        return sample, label, idx
 
     def video_transform(self, args, np_clip, np_map):
         # if args.modality == "rgb" or args.modality == "both":
@@ -272,8 +276,14 @@ class NTU(Dataset):
         np_clip /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
 
         # scale
-        np_map /= 4400. # 0~1
-        np_map -= 0.5
+        # np_map /= 4400. # 0~1
+        # np_map -= 0.5
+        # same as rgb
+        np_map /= 255.
+
+        # Normalization
+        np_map -= np.asarray([0.485, 0.456, 0.406]).reshape(1, 1, 3)  # mean
+        np_map /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
         # if args.modality == "skeleton" or args.modality == "both":
         #     # Take joint 2 of first person as origins for each person
         #     if args.no_norm == False:
@@ -300,7 +310,7 @@ if __name__ == "__main__":
     parser.add_argument("--vid_dim", action="store", default=256, dest="vid_dim",
                         help="frame side dimension (square image assumed) ")
     parser.add_argument("--vid_fr", action="store", default=30, dest="vi_fr", help="video frame rate")
-    parser.add_argument("--vid_len", action="store", default=(8, 32), dest="vid_len", type=int, help="length of video")
+    parser.add_argument("--vid_len", action="store", default=(8, 8), dest="vid_len", type=int, help="length of video")
     parser.add_argument('--modality', type=str, help='modality: rgb, skeleton, both', default='rgb')
     parser.add_argument("--hp", action="store_true", default=False, dest="hp", help="random search on hp")
     parser.add_argument("--no_norm", action="store_true", default=False, dest="no_norm",

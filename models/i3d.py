@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.model_zoo as model_zoo
 import math
 
-def resnet(**kwargs):
+def inflated_resnet(**kwargs):
     list_block = [Bottleneck3D, Bottleneck3D, Bottleneck3D, Bottleneck3D]
     list_layers = [3, 4, 6, 3]
 
@@ -84,13 +85,14 @@ def load_pretrained_2D_weights(arch, model, inflation):
 class I3D(nn.Module):
     def __init__(self, low_dim=128, in_channel=3, width=1, vid_len=8):
         super(I3D, self).__init__()
-        self.cnn = resnet.inflated_resnet()
+        self.cnn = inflated_resnet()
         self.avgpool_Tx7x7 = nn.AvgPool3d((vid_len, 7, 7))
         self.D = 2048
         self.classifier = nn.Linear(self.D, low_dim)
 
     def temporal_pooling(self, x):
         B, D, T, W, H = x.size()
+        # print (B, D, T, W, H) # 1 2048 8 8 10
         if self.D == D:
             final_representation = self.avgpool_Tx7x7(x)
             final_representation = final_representation.view(B, self.D)
@@ -275,7 +277,7 @@ class Bottleneck3D(nn.Module):
 
 class I3DV1(nn.Module):
     def __init__(self, name='resnet50'):
-        super(ResNetV3, self).__init__()
+        super(I3DV1, self).__init__()
         if name == 'resnet50':
             self.l_to_ab = I3D()
             self.ab_to_l = I3D()
@@ -288,20 +290,19 @@ class I3DV1(nn.Module):
         else:
             raise NotImplementedError('model {} is not implemented'.format(name))
 
-    def forward(self, l, ab, layer=7): # x: [bs, 3, width, height]
+    def forward(self, l, ab): # x: [bs, 3, width, height]
         # l: [bs, 3, width, height]
         # ab: [bs, 1, width, height]
         # l, ab = torch.split(x, [1, 2], dim=1)
-        feat_l = self.l_to_ab(l, layer) # 
+        feat_l = self.l_to_ab(l) # 
 
-        feat_ab = self.ab_to_l(ab, layer)
+        feat_ab = self.ab_to_l(ab)
         return feat_l, feat_ab
 
 
 class MyI3DCMC(nn.Module):
     def __init__(self, name='resnet50v1'):
-        super(MyResNetsCMC, self).__init__()
-        self.encoder = I3D()
+        super(MyI3DCMC, self).__init__()
         if name.endswith('v1'):
             self.encoder = I3DV1(name[:-2])
         elif name.endswith('v2'):
@@ -314,4 +315,4 @@ class MyI3DCMC(nn.Module):
         self.encoder = nn.DataParallel(self.encoder)
 
     def forward(self, l, ab, layer=7):
-        return self.encoder(l, ab, layer)
+        return self.encoder(l, ab)
