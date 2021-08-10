@@ -8,6 +8,8 @@ import sys
 import time
 import torch
 import torch.backends.cudnn as cudnn
+import torch.nn as nn
+import torch.nn.functional as F
 import argparse
 import socket
 
@@ -74,6 +76,7 @@ def parse_option():
 
     # video
     parser.add_argument('--num_segments', type=int, default=8, help='')
+    parser.add_argument('--num_classes', type=int, default=60, help='')
 
     # dataset
     parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet100', 'imagenet'])
@@ -205,12 +208,10 @@ def set_optimizer(args, model):
     return optimizer
 
 
-def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optimizer, opt):
+def train(epoch, train_loader, model, cls_l, cls_ab, contrast, criterion_l, criterion_ab, criterion_cls, optimizer, cls_l_optimizer, cls_ab_optimizer, opt):
     """
     one epoch training
     """
-    model.train()
-    contrast.train()
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -219,6 +220,8 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
     ab_loss_meter = AverageMeter()
     l_prob_meter = AverageMeter()
     ab_prob_meter = AverageMeter()
+    cls_l_loss_meter = AverageMeter()
+    cls_ab_loss_meter = AverageMeter()
 
     end = time.time()
     for idx, (inputs, index) in enumerate(train_loader):
@@ -233,9 +236,14 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
             index = index.cuda()
             l = l.cuda()
             ab = ab.cuda()
+            label = label.cuda()
 
-        # ===================forward=====================
-        feat_l, feat_ab = model(l, ab) # [bs, 128]
+        # ===================forward feature=====================
+        model.train()
+        contrast.train()
+        cls_l.eval()
+        cls_ab.eval()
+        hidden_l, feat_l, hidden_ab, feat_ab = model(l, ab) # [bs, 128]
         # print (feat_l.size())
         # print (feat_ab.size())
         out_l, out_ab = contrast(feat_l, feat_ab, index)
@@ -246,7 +254,7 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
 
         loss = l_loss + ab_loss
 
-        # ===================backward=====================
+        # ===================backward feature=====================
         optimizer.zero_grad()
         if opt.amp:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -256,12 +264,37 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-4, norm_type=2.0)
         optimizer.step()
 
+        # ===================forward cls=====================
+        model.eval()
+        contrast.eval()
+        cls_l.train()
+        cls_ab.train()
+        hidden_l, hidden_ab = hidden_l.detach(), hidden_ab.detach()
+        # logits_l = F.softmax(cls_l(hidden_l), dim=1)
+        # logits_ab = F.softmax(cls_ab(hidden_ab), dim=1)
+        logits_l = cls_l(hidden_l)
+        logits_ab = cls_ab(hidden_ab)
+        cls_l_loss = criterion_cls(logits_l, label)
+        cls_ab_loss = criterion_cls(logits_ab, label)
+        cls_loss = cls_l_loss + cls_ab_loss
+
+        # ===================backward cls=====================
+        cls_l_optimizer.zero_grad()
+        cls_l_loss.backward()
+        cls_l_optimizer.step()
+
+        cls_ab_optimizer.zero_grad()
+        cls_ab_loss.backward()
+        cls_ab_optimizer.step()
+
         # ===================meters=====================
         losses.update(loss.item(), bsz)
         l_loss_meter.update(l_loss.item(), bsz)
         l_prob_meter.update(l_prob.item(), bsz)
         ab_loss_meter.update(ab_loss.item(), bsz)
         ab_prob_meter.update(ab_prob.item(), bsz)
+        cls_l_loss_meter.update(cls_l_loss.item(), bsz)
+        cls_ab_loss_meter.update(cls_ab_loss.item(), bsz)
 
         torch.cuda.synchronize()
         batch_time.update(time.time() - end)
@@ -273,15 +306,17 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, optim
                 #   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 #   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'loss {loss.val:.3f} ({loss.avg:.3f})\t'
-                  'l_p {lprobs.val:.3f} ({lprobs.avg:.3f})\t'
-                  'ab_p {abprobs.val:.3f} ({abprobs.avg:.3f})'.format(
+                #   'l_p {lprobs.val:.3f} ({lprobs.avg:.3f})\t'
+                #   'ab_p {abprobs.val:.3f} ({abprobs.avg:.3f})\t'
+                  'cls_l_loss {clsllosses.val:.3f} ({clsllosses.avg:.3f})\t'
+                  'cls_ab_loss {clsablosses.val:.3f} ({clsablosses.avg:.3f})'.format(
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses, lprobs=l_prob_meter,
-                   abprobs=ab_prob_meter))
+                   abprobs=ab_prob_meter, clsllosses=cls_l_loss_meter, clsablosses=cls_ab_loss_meter))
             # print(out_l.shape)
             sys.stdout.flush()
 
-    return l_loss_meter.avg, l_prob_meter.avg, ab_loss_meter.avg, ab_prob_meter.avg
+    return l_loss_meter.avg, l_prob_meter.avg, ab_loss_meter.avg, ab_prob_meter.avg, cls_l_loss_meter.avg, cls_ab_loss_meter.avg 
 
 
 def main():
@@ -295,9 +330,26 @@ def main():
     # set the model
     model, contrast, criterion_ab, criterion_l = set_model(args, n_data)
 
+    cls_l = nn.Linear(2048, args.num_classes)
+    cls_ab = nn.Linear(2048, args.num_classes)
+
+    criterion_cls = nn.CrossEntropyLoss()
+
+    if torch.cuda.is_available():
+        cls_l = cls_l.cuda()
+        cls_ab = cls_ab.cuda()
+        criterion_cls = criterion_cls.cuda()
+
     # set the optimizer
     optimizer = set_optimizer(args, model)
-
+    cls_l_optimizer =  torch.optim.SGD(cls_l.parameters(),
+                                lr=args.learning_rate,
+                                momentum=args.momentum,
+                                weight_decay=args.weight_decay)
+    cls_ab_optimizer =  torch.optim.SGD(cls_ab.parameters(),
+                                lr=args.learning_rate,
+                                momentum=args.momentum,
+                                weight_decay=args.weight_decay)
     # set mixed precision
     if args.amp:
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.opt_level)
@@ -332,8 +384,8 @@ def main():
         print("==> training...")
 
         time1 = time.time()
-        l_loss, l_prob, ab_loss, ab_prob = train(epoch, train_loader, model, contrast, criterion_l, criterion_ab,
-                                                 optimizer, args)
+        l_loss, l_prob, ab_loss, ab_prob, cls_l_loss, cls_ab_loss = train(epoch, train_loader, model, cls_l, cls_ab, contrast, criterion_l, criterion_ab, criterion_cls,
+                                                 optimizer, cls_l_optimizer, cls_ab_optimizer, args)
         time2 = time.time()
         print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
@@ -342,7 +394,9 @@ def main():
         logger.log_value('l_prob', l_prob, epoch)
         logger.log_value('ab_loss', ab_loss, epoch)
         logger.log_value('ab_prob', ab_prob, epoch)
-
+        logger.log_value('cls_l_loss', cls_l_loss, epoch)
+        logger.log_value('cls_ab_loss', cls_ab_loss, epoch)
+        
         # save model
         if epoch % args.save_freq == 0:
             print('==> Saving...')
@@ -352,6 +406,10 @@ def main():
                 'contrast': contrast.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'epoch': epoch,
+                'cls_l': cls_l.state_dict(),
+                'cls_ab': cls_ab.state_dict(),
+                'cls_l_optimizer': cls_l_optimizer.state_dict(),
+                'cks_ab_optimizer': cks_ab_optimizer.state_dict(),
             }
             if args.amp:
                 state['amp'] = amp.state_dict()

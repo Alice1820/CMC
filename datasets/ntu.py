@@ -24,7 +24,8 @@ def load_video(path, vid_len=8):
         ret, frame = cap.read()
 
         if cap.isOpened() and fr_idx in taken:
-            video[np_idx, :, :, :] = frame.astype(np.float32)
+            if frame is not None:
+                video[np_idx, :, :, :] = frame.astype(np.float32)
             np_idx += 1
 
     cap.release()
@@ -264,7 +265,7 @@ class NTU(Dataset):
         if self.transform:
             sample = self.transform(sample)
 
-        return sample, label, idx
+        return sample, idx
 
     def video_transform(self, args, np_clip, np_map):
         # if args.modality == "rgb" or args.modality == "both":

@@ -13,7 +13,7 @@ class NCECriterion(nn.Module):
         self.n_data = n_data
 
     def forward(self, x):
-        print (x[0])
+        # print (x[0])
         bsz = x.shape[0]
         m = x.size(1) - 1
 
