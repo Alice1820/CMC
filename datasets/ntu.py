@@ -7,9 +7,18 @@ import random
 import cv2
 from sklearn.utils import shuffle
 
+from torchvision import transforms
+import torchvision.transforms as transforms
+import random
+import cv2
+from sklearn.utils import shuffle
+
+from PIL import ImageFilter
+import random
+from scipy.stats import norm
 
 # %% tools
-def load_video(path, vid_len=8):
+def load_video(path, vid_len=32):
     cap = cv2.VideoCapture(path)
     num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -32,6 +41,26 @@ def load_video(path, vid_len=8):
 
     return video
 
+def load_depth(path, vid_len=32):
+    img_list = os.listdir(path)
+    num_frames = len(img_list)
+    width = 310
+    height = 256
+    dim = (width, height)
+    # Init the numpy array
+    video = np.zeros((vid_len, height, width)).astype(np.float32)
+    taken = np.linspace(0, num_frames, vid_len).astype(int)
+
+    np_idx = 0
+    for fr_idx in range(num_frames):
+        if fr_idx in taken: # 24 frames
+            img_path = os.path.join(path, img_list[fr_idx])
+            img = cv2.imread(img_path, cv2.IMREAD_ANYDEPTH) # 16bit
+            if not img is None: # skip empty frame
+                img = cv2.resize(img, dim) # 310*256
+                video[np_idx, :, :] = np.array(img, dtype=np.float32)
+            np_idx += 1
+    return video
 
 # 3d coordinates cf. https://github.com/shahroudy/NTURGB-D/blob/master/Matlab/read_skeleton_file.m for more details
 def get_3D_skeleton(path):
@@ -174,7 +203,7 @@ class AugCrop(object):
 class NTU(Dataset):
 
     def __init__(self, root_dir='',  # /data0/xifan/NTU_RGBD_60
-                 transform=None,
+                 split='cross_subject', # 40 subject, 3 camera
                  stage='train',
                  vid_len=(8, 8),
                  vid_dim=256,
@@ -186,39 +215,61 @@ class NTU(Dataset):
             transform (callable, optional): Optional transform to be applied
                 on a sample.
         """
-
-        if stage == 'train':
-            subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
-        elif stage == 'trainexp':
-            subjects = [1, 4, 8, 13, 15, 17, 19]
-        elif stage == 'test':
-            subjects = [3, 6, 7, 10, 11, 12, 20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 36, 37, 39, 40]
-        elif stage == 'dev':  # smaller train datase for exploration
-            subjects = [2, 5, 9, 14]
-
         basename_rgb = os.path.join(root_dir, 'nturgbd_rgb/avi_310x256_30') 
-        basename_dep = os.path.join(root_dir, 'nturgbd_depth_full/depth_f_310x256_30')
-        # basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/310x256_{1}')
-        # basename_ske = os.path.join(root_dir, 'nturgbd_skeletons')
-
-        # self.original_w, self.original_h = 1920, 1080
+        basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/dep_310*256')
+    
         self.vid_len = vid_len
 
         self.rgb_list = []
         self.dep_list = []
         self.ske_list = []
         self.labels = []
+        self.subject_ids = []
 
-        self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if
+        if split == 'cross_subject':
+            if stage == 'train':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
+            elif stage == 'train25':
+                subjects = [1, 4, 8, 13]
+            elif stage == 'train50':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18]
+            elif stage == 'trainexp':
+                subjects = [1, 4, 8, 13, 15, 17, 19]
+            elif stage == 'test':
+                subjects = [3, 6, 7, 10, 11, 12, 20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 36, 37, 39, 40]
+            elif stage == 'dev':  # smaller train datase for exploration
+                subjects = [2, 5, 9, 14]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if
                           f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
-        self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if
-                          f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
-        # self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if
-        #                   os.path.isdir(os.path.join(basename_dep, f)) and int(f[9:12]) in subjects]
-        # self.ske_list += [os.path.join(basename_ske, f) for f in sorted(os.listdir(basename_ske)) if
-        #                   f.split(".")[-1] == "skeleton" and int(f[9:12]) in subjects]
-        self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename_rgb)) if
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[9:12]) in subjects]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename_rgb)) if
                         f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.subject_ids += [int(f[9:12]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+        elif split == 'cross_view':
+            if stage == 'train':
+                cameras = [2, 3]
+            elif stage == 'trainss':  # self-supervised training
+                cameras = [2, 3]
+                # cameras = [3]
+            elif stage == 'trains':
+                cameras = [2]
+            elif stage == 'test':
+                cameras = [1]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if 
+                            f.split(".")[-1] == "avi" and int(f[5:8]) in cameras]
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[5:8]) in cameras]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename)) if int(f[5:8]) in cameras]
+        else:
+            raise Exception('wrong mode: ' + args.mode)
+        # basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/310x256_{1}')
+        # basename_ske = os.path.join(root_dir, 'nturgbd_skeletons')
+
+        # self.original_w, self.original_h = 1920, 1080
 
         # if args.no_bad_skel:
         #     with open("bad_skel.txt", "r") as f:
@@ -229,9 +280,9 @@ class NTU(Dataset):
         #                 self.rgb_list.pop(i)
         #                 self.labels.pop(i)
 
-        self.rgb_list, self.dep_list, self.labels = shuffle(self.rgb_list, self.dep_list, self.labels)
+        self.rgb_list, self.dep_list, self.labels, self.subject_ids = shuffle(self.rgb_list, self.dep_list, self.labels, self.subject_ids)
 
-        self.transform = transform
+        self.transform = (stage in ['train', 'train25', 'train50', 'trainss', 'trains'])
         self.root_dir = root_dir
         self.stage = stage
         self.mode = stage
@@ -247,27 +298,51 @@ class NTU(Dataset):
         deppath = self.dep_list[idx]
 
         label = self.labels[idx]
+        subject_id = self.subject_ids[idx]
 
         video = np.zeros([1])
         maps = np.zeros([1])
         # skeleton = np.zeros([1])
 
         # if self.args.modality == "rgb" or self.args.modality == "both":
-        video = load_video(rgbpath, vid_len=self.vid_len[0])
-        # maps = load_depth(deppath)
-        maps = load_video(deppath, vid_len=self.vid_len[1])
+        video = load_video(rgbpath)
+        depth = load_depth(deppath)
         # if self.args.modality == "skeleton" or self.args.modality == "both":
         #     skeleton = get_3D_skeleton(skepath)
 
-        video, maps = self.video_transform(self.args, video, maps)
-
-        sample = {'rgb': video, 'dep': maps, 'label': label - 1}
+        # video, maps = self.video_transform(self.args, video, maps)
+        video = self.video_transform(video) # (32, 256, 310, 3)
+        depth = self.depth_transform(video)
+        # print (video.shape)
+        # print (depth.shape)
         if self.transform:
-            sample = self.transform(sample)
+            video = self.augmentation(video)
+            depth = self.augmentation(depth)
+        else:
+            video = self.transformation(video)
+            depth = self.transformation(depth)
+        sample = {'rgb': video, 'dep': depth, 'label': label - 1, 'subject_id': subject_id - 1}
 
         return sample, idx
 
-    def video_transform(self, args, np_clip, np_map):
+    def augmentation(self, video):
+        video = self.NormalizeLen(video, self.vid_len[0])
+        video = self.NumToTensor(video)
+        video = self.ToPILImage(video)
+        video = self.SpaRandomFlip(video)
+        video = self.SpaRandomCrop(video)
+        video = self.ToTensor(video)
+        return video
+
+    def transformation(self, video):
+        video = self.NormalizeLen(video, self.vid_len[0])
+        video = self.NumToTensor(video)
+        video = self.ToPILImage(video)
+        video = self.SpaCenterCrop(video)
+        video = self.ToTensor(video)
+        return video
+
+    def video_transform(self, np_clip):
         # if args.modality == "rgb" or args.modality == "both":
         # Div by 255
         np_clip /= 255.
@@ -276,24 +351,68 @@ class NTU(Dataset):
         np_clip -= np.asarray([0.485, 0.456, 0.406]).reshape(1, 1, 3)  # mean
         np_clip /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
 
-        # scale
-        # np_map /= 4400. # 0~1
-        # np_map -= 0.5
-        # same as rgb
-        np_map /= 255.
+        return np_clip
 
-        # Normalization
-        np_map -= np.asarray([0.485, 0.456, 0.406]).reshape(1, 1, 3)  # mean
-        np_map /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
-        # if args.modality == "skeleton" or args.modality == "both":
-        #     # Take joint 2 of first person as origins for each person
-        #     if args.no_norm == False:
-        #         origin = np_skeleton[:, :, 1, 0]
-        #         np_skeleton = np_skeleton - origin[:, :, None, None]
+    def depth_transform(self, np_clip):
+        ####### depth ######
+        # histogram, fit the first frame of each video to a gauss distribution
+        # frame = np_clip[0, :, :]
+        # data = np.reshape(frame, [frame.size])
+        # data = data[(data >= 500) * (data <= 4500)] # range for skeleton detection
+        # mu, std = norm.fit(data)
+        # print (mu, std)
+        # # select certain range
+        # r_min = mu - std
+        # r_max = mu + std
+        # np_clip[(np_clip < r_min)] = 0.0
+        # np_clip[(np_clip > r_max)] = 0.0
+        # np_clip = np_clip - mu
+        # np_clip = np_clip / std # -3~3
+        # repeat to BGR to fit pretrained resnet parameters
+        # np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
 
-        return np_clip, np_map # rgb, depth
+        return np_clip
+    
+    def TemAugCrop(self, vid):
+        p_interval = 0.5
+        ratio = (1.0 - p_interval * np.random.rand())
+        if vid.shape[0] != 1:
+            num_frames = len(vid)
+            begin = (num_frames - int(num_frames * ratio)) // 2
+            vid = vid[begin:(num_frames - begin), :, :, :]
+        return vid
 
+    def NormalizeLen(self, vid, vid_len=8):
+        if vid.shape[0] != 1:
+            num_frames = len(vid)
+            indices = np.linspace(0, num_frames - 1, vid_len).astype(int)
+            vid = vid[indices, :, :, :]
+        return vid
 
+    def NumToTensor(self, vid):
+        return torch.from_numpy(vid.astype(np.float32)).unsqueeze(1).transpose(1, 4).squeeze()
+
+    def SpaRandomFlip(self, vid):
+        p_hflip = np.random.rand(1)
+        if p_hflip > 0.5:
+            return [transforms.functional.hflip(x) for x in vid]
+        else:
+            return vid
+
+    def SpaRandomCrop(self, vid, vid_dim=(224, 224)):
+        transform_crop = transforms.RandomCrop(vid_dim)
+        coors = transform_crop.get_params(vid[0], vid_dim)
+        i, j, h, w = coors
+        return [transforms.functional.crop(x, i, j, h, w) for x in vid]
+
+    def SpaCenterCrop(self, vid, vid_dim=(224, 224)):
+        return [transforms.CenterCrop(vid_dim)(x) for x in vid]
+
+    def ToPILImage(self, vid):
+        return [transforms.ToPILImage()(x) for x in vid]
+
+    def ToTensor(self, vid):
+        return torch.stack([transforms.ToTensor()(x) for x in vid])
 # %%
 import argparse
 

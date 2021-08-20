@@ -456,7 +456,7 @@ class TSN(nn.Module):
         self._prepare_base_model(base_model)
 
         feature_dim = self._prepare_tsn(num_class)
-
+        
         if self.modality == 'Flow':
             print("Converting the ImageNet model to a flow init model")
             self.base_model = self._construct_flow_model(self.base_model)
@@ -659,12 +659,13 @@ class TSN(nn.Module):
 
     def forward(self, input, no_reshape=False):
         # Changing temporal and channel dim to fit the inflated resnet input requirements
-        B, T, W, H, C = input.size()
+        # B, T, W, H, C = input.size()
         input = input.view(B, 1, T, W, H, C)
         input = input.transpose(1, -1)
         input = input.view(B, C, T, W, H)
         input = input.transpose(1, 2)
         input = input.contiguous()
+        # print (input.size())
         if not no_reshape:
             sample_len = (3 if self.modality == "RGB" else 2) * self.new_length
 
@@ -799,13 +800,14 @@ class TSN(nn.Module):
                                                    GroupRandomHorizontalFlip(is_flow=False)])
 
 class TSNV2(nn.Module):
-    def __init__(self, num_class=128, num_segments=8, modality='RGB',
+    def __init__(self, num_class=60, num_segments=8, modality='RGB',
                  base_model='resnet50', new_length=None,
                  consensus_type='avg', before_softmax=True,
                  dropout=0.8, img_feature_dim=256,
                  crop_num=1, partial_bn=True, print_spec=True, pretrain='imagenet',
                  is_shift=False, shift_div=8, shift_place='blockres', fc_lr5=False,
-                 temporal_pool=False, non_local=False):
+                 temporal_pool=False, non_local=False,
+                 cmc_feature_dim=128):
         super(TSNV2, self).__init__()
         self.modality = modality
         self.num_segments = num_segments
@@ -846,7 +848,8 @@ class TSNV2(nn.Module):
 
         self._prepare_base_model(base_model)
 
-        feature_dim = self._prepare_tsn(num_class)
+        feature_dim = self._prepare_new_fc(num_class=cmc_feature_dim)
+        _ = self._prepare_classifier(feature_dim, num_class)
 
         if self.modality == 'Flow':
             print("Converting the ImageNet model to a flow init model")
@@ -866,7 +869,7 @@ class TSNV2(nn.Module):
         if partial_bn:
             self.partialBN(True)
 
-    def _prepare_tsn(self, num_class):
+    def _prepare_new_fc(self, num_class=128):
         feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
         if self.dropout == 0:
             setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
@@ -883,6 +886,26 @@ class TSNV2(nn.Module):
             if hasattr(self.new_fc, 'weight'):
                 normal_(self.new_fc.weight, 0, std)
                 constant_(self.new_fc.bias, 0)
+        return feature_dim
+
+    def _prepare_classifier(self, feature_dim=2048, num_class=60):
+        # feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
+        # if self.dropout == 0:
+        #     setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
+        #     self.classifier = None
+        # else:
+        #     setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.dropout))
+        #     self.classifier = nn.Linear(feature_dim, num_class)
+
+        # std = 0.001
+        # if self.classifier is None:
+        #     normal_(getattr(self.base_model, self.base_model.last_layer_name).weight, 0, std)
+        #     constant_(getattr(self.base_model, self.base_model.last_layer_name).bias, 0)
+        # else:
+        #     if hasattr(self.classifier, 'weight'):
+        #         normal_(self.classifier.weight, 0, std)
+        #         constant_(self.classifier.bias, 0)
+        self.classifier = nn.Linear(feature_dim, num_class)
         return feature_dim
 
     def _prepare_base_model(self, base_model):
@@ -1050,12 +1073,12 @@ class TSNV2(nn.Module):
 
     def forward(self, input, no_reshape=False):
         # Changing temporal and channel dim to fit the inflated resnet input requirements
-        B, T, W, H, C = input.size()
-        input = input.view(B, 1, T, W, H, C)
-        input = input.transpose(1, -1)
-        input = input.view(B, C, T, W, H)
-        input = input.transpose(1, 2)
-        input = input.contiguous()
+        # B, T, W, H, C = input.size()
+        # input = input.view(B, 1, T, W, H, C)
+        # input = input.transpose(1, -1)
+        # input = input.view(B, C, T, W, H)
+        # input = input.transpose(1, 2)
+        # input = input.contiguous()
         if not no_reshape:
             sample_len = (3 if self.modality == "RGB" else 2) * self.new_length
 
@@ -1067,29 +1090,45 @@ class TSNV2(nn.Module):
         else:
             base_out = self.base_model(input)
 
-        if self.reshape:
-            if self.is_shift and self.temporal_pool:
-                hidden_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
-            else:
-                hidden_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
-            hidden_output = self.consensus(hidden_out)
-        
-        # feature out
+        # hidden out for classifier
+        if True:
+            hidden_out = base_out.detach() # freeze feature extractor for training linear classifier
+        else:
+            hidden_out = base_out
         if self.dropout > 0:
             # print (base_out.size())
-            base_out = self.new_fc(base_out)
+            hidden_out = self.classifier(hidden_out)
 
         if not self.before_softmax:
-            base_out = self.softmax(base_out)
+            hidden_out = self.softmax(hidden_out)
 
         if self.reshape:
             if self.is_shift and self.temporal_pool:
-                base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
+                hidden_out = hidden_out.view((-1, self.num_segments // 2) + hidden_out.size()[1:])
             else:
-                base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
-            output = self.consensus(base_out)
+                hidden_out = hidden_out.view((-1, self.num_segments) + hidden_out.size()[1:])
+            hidden_output = self.consensus(hidden_out)
+        
+        # feature out for cmc
+        if self.dropout > 0:
+            # print (base_out.size())
+            cmc_out = self.new_fc(base_out)
 
-        return hidden_output.squeeze(1), output.squeeze(1)
+        if not self.before_softmax:
+            cmc_out = self.softmax(cmc_out)
+
+        if self.reshape:
+            if self.is_shift and self.temporal_pool:
+                cmc_out = cmc_out.view((-1, self.num_segments // 2) + cmc_out.size()[1:])
+            else:
+                cmc_out = cmc_out.view((-1, self.num_segments) + cmc_out.size()[1:])
+            cmc_output = self.consensus(cmc_out)
+        
+        # 2048  
+        base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
+        base_output = self.consensus(base_out)
+
+        return hidden_output.squeeze(1), cmc_output.squeeze(1), base_output.squeeze(1)
 
     def _get_diff(self, input, keep_rgb=False):
         input_c = 3 if self.modality in ["RGB", "RGBDiff"] else 2
@@ -1244,27 +1283,30 @@ class TSMV2(nn.Module):
         # elif name == 'resnet101':
         #     self.l_to_ab = resnet101(in_channel=1, width=2)
         #     self.ab_to_l = resnet101(in_channel=2, width=2)
-        self.l_to_ab = TSNV2(num_segments=args.num_segments, num_class=400)
-        self.ab_to_l = TSNV2(num_segments=args.num_segments, num_class=400)
-        if True:
+        if False:
+            self.l_to_ab = TSNV2(num_segments=args.num_segments, num_class=400)
+            self.ab_to_l = TSNV2(num_segments=args.num_segments, num_class=400)
             checkpoint_pth = 'pretrain/TSM_kinetics_RGB_resnet50_avg_segment5_e50.pth'
             self.l_to_ab.load_state_dict({k.replace('module.',''):v for k,v in torch.load(checkpoint_pth)['state_dict'].items()})
             self.ab_to_l.load_state_dict({k.replace('module.',''):v for k,v in torch.load(checkpoint_pth)['state_dict'].items()})
             self.l_to_ab.new_fc = nn.Linear(2048, args.feat_dim)
             self.ab_to_l.new_fc = nn.Linear(2048, args.feat_dim)
             print('=> loaded pretrained base model')
-
         else:
-            raise NotImplementedError('model {} is not implemented'.format(name))
+            self.l_to_ab = TSNV2(num_segments=args.num_segments, num_class=args.num_class, base_model=args.base_model)
+            self.ab_to_l = TSNV2(num_segments=args.num_segments, num_class=args.num_class, base_model=args.base_model)
+
+        # else:
+        #     raise NotImplementedError('model {} is not implemented'.format(name))
 
     def forward(self, l, ab): # x: [bs, 3, width, height]
         # l: [bs, 3, width, height]
         # ab: [bs, 1, width, height]
         # l, ab = torch.split(x, [1, 2], dim=1)
-        hidden_l, feat_l = self.l_to_ab(l) # 
+        hidden_l, cmc_l, feat_l = self.l_to_ab(l) # 
 
-        hidden_ab, feat_ab = self.ab_to_l(ab)
-        return hidden_l, feat_l, hidden_ab, feat_ab
+        hidden_ab, cmc_ab, feat_ab = self.ab_to_l(ab)
+        return hidden_l, cmc_l, feat_l, hidden_ab, cmc_ab, feat_ab
 
 
 class MyTSMCMC(nn.Module):
