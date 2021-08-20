@@ -99,6 +99,9 @@ def parse_option():
     # data crop threshold
     parser.add_argument('--crop_low', type=float, default=0.2, help='low area in crop')
 
+    # CMC phase
+    parser.add_argument('--phase', type=str, default='cls', choices=['cmc', 'cls'])
+
     opt = parser.parse_args()
 
     if (opt.data_folder is None) or (opt.model_path is None) or (opt.tb_path is None):
@@ -114,7 +117,7 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
 
     opt.method = 'softmax' if opt.softmax else 'nce'
-    opt.model_name = 'joint_{}_{}_{}_lr_{}_decay_{}_bsz_{}'.format(opt.method, opt.nce_k, opt.model, opt.learning_rate,
+    opt.model_name = 'cls3_{}_{}_{}_lr_{}_decay_{}_bsz_{}'.format(opt.method, opt.nce_k, opt.model, opt.learning_rate,
                                                                     opt.weight_decay, opt.batch_size)
 
     if opt.amp:
@@ -205,14 +208,22 @@ def set_model(args, n_data):
 
 def set_optimizer(args, model):
     # return optimizer
-    optimizer = torch.optim.SGD(model.parameters(),
-                                lr=args.learning_rate,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
+    if args.phase == 'cmc':
+        optimizer = torch.optim.SGD(model.parameters(),
+                                    lr=args.learning_rate,
+                                    momentum=args.momentum,
+                                    weight_decay=args.weight_decay)
+    elif args.phase == 'cls':
+        optimizer = torch.optim.SGD(model.parameters(),
+                                    lr=args.learning_rate,
+                                    momentum=args.momentum,
+                                    weight_decay=args.weight_decay)
+    else:
+        raise Exception('args.phase')
     return optimizer
 
 
-def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, criterion_cls, optimizer, opt):
+def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, criterion_cls, optimizer, args):
     """
     one epoch training
     """
@@ -249,18 +260,19 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, crite
         # ===================forward feature=====================
         model.train()
         # model.eval() # verify after loaded model, cmc loss start with 4.xx
-        contrast.train()
-        # contrast.eval()
+        # contrast.train()
+        contrast.eval()
         logits_l, feat_l, _, logits_ab, feat_ab, _ = model(l, ab) # [bs, 128]
         # print (feat_l.size())
         # print (logits_ab.size())
-        out_l, out_ab = contrast(feat_l, feat_ab, index)
-        l_loss = criterion_l(out_l)
-        ab_loss = criterion_ab(out_ab)
-        l_prob = out_l[:, 0].mean()
-        ab_prob = out_ab[:, 0].mean()
+        if args.phase == 'cmc':
+            out_l, out_ab = contrast(feat_l, feat_ab, index)
+            l_loss = criterion_l(out_l)
+            ab_loss = criterion_ab(out_ab)
+            l_prob = out_l[:, 0].mean()
+            ab_prob = out_ab[:, 0].mean()
 
-        cmc_loss = l_loss + ab_loss
+            cmc_loss = l_loss + ab_loss
 
         # ===================forward cls=====================
         # hidden_l, hidden_ab = hidden_l.detach(), hidden_ab.detach()
@@ -283,15 +295,15 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, crite
         # cls_ab_optimizer.step()
         
         # ===================backward feature=====================
-        # loss = cls_loss
-        loss = cmc_loss
+        if args.phase == 'cmc':
+            loss = cmc_loss
+        elif args.phase == 'cls':
+            loss = cls_loss
+        else:
+            raise Exception('args.phase')
         # loss = cmc_loss + cls_loss
         optimizer.zero_grad()
-        if opt.amp:
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            loss.backward()
+        loss.backward()
         # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e2, norm_type=1)
         # print (model.encoder.module.l_to_ab.classifier.weight.grad)
         # print (model.encoder.module.l_to_ab.classifier.bias.grad)
@@ -306,11 +318,11 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, crite
         acc_l = np.mean((pred_l==label).cpu().numpy())*100
         acc_ab = np.mean((pred_ab==label).cpu().numpy())*100
 
-        losses.update(cmc_loss.item(), bsz)
-        l_loss_meter.update(l_loss.item(), bsz)
-        l_prob_meter.update(l_prob.item(), bsz)
-        ab_loss_meter.update(ab_loss.item(), bsz)
-        ab_prob_meter.update(ab_prob.item(), bsz)
+        # losses.update(cmc_loss.item(), bsz)
+        # l_loss_meter.update(l_loss.item(), bsz)
+        # l_prob_meter.update(l_prob.item(), bsz)
+        # ab_loss_meter.update(ab_loss.item(), bsz)
+        # ab_prob_meter.update(ab_prob.item(), bsz)
         cls_l_loss_meter.update(cls_l_loss.item(), bsz)
         cls_ab_loss_meter.update(cls_ab_loss.item(), bsz)
         acc_l_meter.update(acc_l, bsz)
@@ -321,11 +333,11 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, crite
         end = time.time()
 
         # print info
-        if (idx + 1) % opt.print_freq == 0:
+        if (idx + 1) % args.print_freq == 0:
             print('Train: [{0}][{1}/{2}]\t'
                 #   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 #   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'cmc_loss {loss.val:.3f} ({loss.avg:.3f})\t'
+                #   'cmc_loss {loss.val:.3f} ({loss.avg:.3f})\t'
                 #   'l_p {lprobs.val:.3f} ({lprobs.avg:.3f})\t'
                 #   'ab_p {abprobs.val:.3f} ({abprobs.avg:.3f})\t'
                   'cls_l_loss {clsllosses.val:.3f} ({clsllosses.avg:.3f})\t'
@@ -333,7 +345,9 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, crite
                   'l_acc {laccs.val:.3f} ({laccs.avg:.3f})\t'
                   'ab_acc {abaccs.val:.3f} ({abaccs.avg:.3f})\t'.format(
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, lprobs=l_prob_meter,
+                   data_time=data_time, 
+                #    loss=losses, 
+                   lprobs=l_prob_meter,
                    abprobs=ab_prob_meter, clsllosses=cls_l_loss_meter, clsablosses=cls_ab_loss_meter,
                    laccs=acc_l_meter, abaccs=acc_ab_meter))
             # print(out_l.shape)
@@ -343,7 +357,7 @@ def train(epoch, train_loader, model, contrast, criterion_l, criterion_ab, crite
     return cls_l_loss_meter.avg, cls_ab_loss_meter.avg 
 
 
-def eval(epoch, train_loader, model, contrast, criterion_l, criterion_ab, criterion_cls, optimizer, opt):
+def eval(epoch, train_loader, model, contrast, criterion_l, criterion_ab, criterion_cls, optimizer, args):
     """
     one epoch evaluation
     """
@@ -440,7 +454,7 @@ def eval(epoch, train_loader, model, contrast, criterion_l, criterion_ab, criter
         end = time.time()
 
         # print info
-        if (idx + 1) % opt.print_freq == 0:
+        if (idx + 1) % args.print_freq == 0:
             print('Eval: [{0}][{1}/{2}]\t'
                 #   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 #   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -541,13 +555,13 @@ def main():
         logger.log_value('train_cls_l_loss', cls_l_loss, epoch)
         logger.log_value('train_cls_ab_loss', cls_ab_loss, epoch)
 
-        # print("==> evaluating...")
+        print("==> evaluating...")
         
-        # time1 = time.time()
-        # cls_l_loss, cls_ab_loss = eval(epoch, eval_loader, model, contrast, criterion_l, criterion_ab, criterion_cls,
-        #                                          optimizer, args)
-        # time2 = time.time()
-        # print('epoch {} test, total time {:.2f}'.format(epoch, time2 - time1))
+        time1 = time.time()
+        cls_l_loss, cls_ab_loss = eval(epoch, eval_loader, model, contrast, criterion_l, criterion_ab, criterion_cls,
+                                                 optimizer, args)
+        time2 = time.time()
+        print('epoch {} test, total time {:.2f}'.format(epoch, time2 - time1))
 
         # # print("==> testing...")
         
@@ -562,8 +576,8 @@ def main():
         # # logger.log_value('l_prob', l_prob, epoch)
         # # logger.log_value('ab_loss', ab_loss, epoch)
         # # logger.log_value('ab_prob', ab_prob, epoch)
-        # logger.log_value('test_cls_l_loss', cls_l_loss, epoch)
-        # logger.log_value('test_cls_ab_loss', cls_ab_loss, epoch)
+        logger.log_value('test_cls_l_loss', cls_l_loss, epoch)
+        logger.log_value('test_cls_ab_loss', cls_ab_loss, epoch)
 
         # save model
         if epoch % args.save_freq == 0:
@@ -581,7 +595,7 @@ def main():
             }
             if args.amp:
                 state['amp'] = amp.state_dict()
-            save_file = os.path.join(args.model_folder, 'cmc3_epoch_{epoch}.pth'.format(epoch=epoch))    
+            save_file = os.path.join(args.model_folder, '{phase}_epoch_{epoch}.pth'.format(phase=args.phase, epoch=epoch))    
             torch.save(state, save_file)
             # help release GPU memory
             del state
