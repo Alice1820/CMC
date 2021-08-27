@@ -35,12 +35,12 @@ def parse_option():
     parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
     parser.add_argument('--save_freq', type=int, default=5, help='save frequency')
     parser.add_argument('--batch_size', type=int, default=256, help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=16, help='num of workers to use')
+    parser.add_argument('--num_workers', type=int, default=8, help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=60, help='number of training epochs')
 
     # optimization
-    parser.add_argument('--learning_rate', type=float, default=0.1, help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='60, 100, 140', help='where to decay lr, can be a list')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
+    parser.add_argument('--lr_decay_epochs', type=str, default='30,40,50', help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.2, help='decay rate for learning rate')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
     parser.add_argument('--weight_decay', type=float, default=0, help='weight decay')
@@ -55,7 +55,7 @@ def parse_option():
                                                                          'resnet50v1', 'resnet101v1', 'resnet18v1',
                                                                          'resnet50v2', 'resnet101v2', 'resnet18v2',
                                                                          'resnet50v3', 'resnet101v3', 'resnet18v3'])
-    parser.add_argument('--model_path', type=str, default=None, help='the model to test') # baseline training from scratch
+    parser.add_argument('--model_path', type=str, default=None, help='the model to test')
     parser.add_argument('--layer', type=int, default=6, help='which layer to evaluate')
 
     # dataset
@@ -66,7 +66,7 @@ def parse_option():
     parser.add_argument('--num_class', type=int, default=60, help='')
 
     # add new views
-    parser.add_argument('--view', type=str, default='RGBD', choices=['Lab', 'YCbCr', 'RGBD'])
+    parser.add_argument('--view', type=str, default='Lab', choices=['Lab', 'YCbCr'])
 
     # path definition
     parser.add_argument('--data_folder', type=str, default='/data0/xifan/NTU_RGBD_60', help='path to data')
@@ -96,8 +96,8 @@ def parse_option():
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
-    opt.model_name = 'tsm'
-    opt.model_name = 'baseline_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model_name, opt.batch_size, opt.learning_rate,
+    opt.model_name = opt.model_path.split('/')[-2]
+    opt.model_name = 'linear_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model_name, opt.batch_size, opt.learning_rate,
                                                                   opt.weight_decay)
 
     opt.model_name = '{}_view_{}'.format(opt.model_name, opt.view)
@@ -188,82 +188,138 @@ def get_train_val_loader(args):
 
 
 def set_model(args):
-    model = TSN()
+    # ===================model x=====================
+    model_x = TSN()
 
-    model = model.cuda()
-    model = nn.DataParallel(model)
-    # # load pre-trained model
-    # print('==> loading pre-trained model')
-    # ckpt = torch.load(args.model_path)
-    # model.load_state_dict(ckpt['model_ab']) # depth
-    # print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
-    # print('==> done')
-    model.eval()
+    model_x = model_x.cuda()
+    model_x = nn.DataParallel(model_x)
+    # ===================model y=====================
+    model_y = TSN()
 
-    classifier = nn.Linear(512, 120)
+    model_y = model_y.cuda()
+    model_y = nn.DataParallel(model_y)
+    # load pre-trained model
+    print('==> loading pre-trained model')
+    ckpt = torch.load(args.model_path)
+    model_x.load_state_dict(ckpt['model_l']) # rgb
+    model_y.load_state_dict(ckpt['model_ab']) # depth
+    print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
+    print('==> done')
+    model_x.eval()
+    model_y.eval()
+
+    # ===================classifier=====================
+    classifier_x = nn.Linear(512, 120)
+    classifier_x = classifier_x.cuda()
+    classifier_x = nn.DataParallel(classifier_x)
+    classifier_x.train()
+
+    classifier_y = nn.Linear(512, 120)
+    classifier_y = classifier_y.cuda()
+    classifier_y = nn.DataParallel(classifier_y)
+    classifier_y.train()
+
+    classifier = nn.Linear(1024, 120)
     classifier = classifier.cuda()
     classifier = nn.DataParallel(classifier)
     classifier.train()
 
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    return model, classifier, criterion
+    return model_x, model_y, classifier_x, classifier_y, classifier, criterion
 
 
-def set_optimizer(args, model, classifier):
-    optimizer = optim.Adam(list(model.parameters()) + list(classifier.parameters()),
+def set_optimizer(args, classifier):
+    optimizer = optim.Adam(classifier.parameters(),
                           lr=args.learning_rate,
                           betas=[args.beta1, args.beta2])
     return optimizer
 
 
-def train(epoch, train_loader, model, classifier, criterion, optimizer, opt):
+def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, optimizer_x, optimizer_y, optimizer, opt):
     """
     one epoch training
     """
-    model.train()
+    model_x.eval()
+    model_y.eval()
     classifier.train()
+    classifier_x.train()
+    classifier_y.train()
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
+    losses_x = AverageMeter()
+    losses_y = AverageMeter()
     top1 = AverageMeter()
+    top1_x = AverageMeter()
+    top1_y = AverageMeter()
     top5 = AverageMeter()
+    top5_x = AverageMeter()
+    top5_y = AverageMeter()
 
     end = time.time()
     for idx, (inputs, index) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        input = inputs['dep']
+        input_x = inputs['rgb']
+        input_y = inputs['dep']
+        input_x = input_x.float()
+        input_y = input_y.float()
         target = inputs['label']
-        input = input.float()
         if opt.gpu is not None:
-            input = input.cuda(opt.gpu, non_blocking=True)
+            input_x = input_x.cuda(opt.gpu, non_blocking=True)
+            input_y = input_y.cuda(opt.gpu, non_blocking=True)
         target = target.cuda(opt.gpu, non_blocking=True)
 
         # ===================forward=====================
-        feat, _ = model(input) # [bs, 8, 2048]
-            # feat = feat.detach()
-            # feat = torch.cat((feat_l.detach(), feat_ab.detach()), dim=1)
+        with torch.no_grad():
+            feat_x, _ = model_x(input_x) # [bs, 8, 512]
+            feat_x = feat_x.detach()
+            feat_y, _ = model_y(input_y) # [bs, 8, 512]
+            feat_y = feat_y.detach()
+            feat = torch.cat((feat_x, feat_y), dim=1) # [bs, 8, 1024]
 
         # ===================consensus feature=====================
         consensus = ConsensusModule('avg')
         enc = classifier(feat) # [bs, 8, 120]
+        enc_x = classifier_x(feat_x) # [bs, 8, 120]
+        enc_y = classifier_y(feat_y) # [bs, 8, 120]
         enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
+        enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
+        enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
         output = consensus(enc).squeeze()
+        output_x = consensus(enc_x).squeeze()
+        output_y = consensus(enc_y).squeeze()
         # print (output.size()) # [bs, 120]
         loss = criterion(output, target)
+        loss_x = criterion(output_x, target)
+        loss_y = criterion(output_y, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), input.size(0))
-        top1.update(acc1[0], input.size(0))
-        top5.update(acc5[0], input.size(0))
+        acc1_x, acc5_x = accuracy(output_x, target, topk=(1, 5))
+        acc1_y, acc5_y = accuracy(output_y, target, topk=(1, 5))
+        losses.update(loss.item(), input_x.size(0))
+        losses_x.update(loss_x.item(), input_x.size(0))
+        losses_y.update(loss_y.item(), input_y.size(0))
+        top1.update(acc1[0], input_x.size(0))
+        top1_x.update(acc1_x[0], input_x.size(0))
+        top1_y.update(acc1[0], input_y.size(0))
+        top5.update(acc5[0], input_x.size(0))
+        top5_x.update(acc5_x[0], input_x.size(0))
+        top5_y.update(acc5[0], input_y.size(0))
 
         # ===================backward=====================
         optimizer.zero_grad()
+        optimizer_x.zero_grad()
+        optimizer_y.zero_grad()
         loss.backward()
+        loss_x.backward()
+        loss_y.backward()
         optimizer.step()
+        optimizer_x.step()
+        optimizer_y.step()
 
         # ===================meters=====================
         batch_time.update(time.time() - end)
@@ -280,49 +336,101 @@ def train(epoch, train_loader, model, classifier, criterion, optimizer, opt):
                    epoch, idx, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses, top1=top1, top5=top5))
             sys.stdout.flush()
+            print('ViewX: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                  'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                  'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                   epoch, idx, len(train_loader), batch_time=batch_time,
+                   data_time=data_time, loss=losses_x, top1=top1_x, top5=top5_x))
+            sys.stdout.flush()
+            print('ViewY: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                  'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                  'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                   epoch, idx, len(train_loader), batch_time=batch_time,
+                   data_time=data_time, loss=losses_y, top1=top1_y, top5=top5_y))
+            sys.stdout.flush()
+            print ('')
 
-    return top1.avg, top5.avg, losses.avg
+
+    return top1.avg, top5.avg, losses.avg, top1_x.avg, top5_x.avg, losses_x.avg, top1_y.avg, top5_y.avg, losses_y.avg
 
 
-def validate(val_loader, model, classifier, criterion, opt):
+def validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, opt):
     """
     evaluation
     """
     batch_time = AverageMeter()
     losses = AverageMeter()
+    losses_x = AverageMeter()
+    losses_y = AverageMeter()
     top1 = AverageMeter()
+    top1_x = AverageMeter()
+    top1_y = AverageMeter()
     top5 = AverageMeter()
+    top5_x = AverageMeter()
+    top5_y = AverageMeter()
 
     # switch to evaluate mode
-    model.eval()
+    model_x.eval()
+    model_y.eval()
     classifier.eval()
+    classifier_x.eval()
+    classifier_y.eval()
 
     with torch.no_grad():
         end = time.time()
         for idx, (inputs, index) in enumerate(val_loader):
 
-            input = inputs['dep']
+            input_x = inputs['rgb']
+            input_y = inputs['dep']
+            input_x = input_x.float()
+            input_y = input_y.float()
             target = inputs['label']
-            input = input.float()
             if opt.gpu is not None:
-                input = input.cuda(opt.gpu, non_blocking=True)
+                input_x = input_x.cuda(opt.gpu, non_blocking=True)
+                input_y = input_y.cuda(opt.gpu, non_blocking=True)
             target = target.cuda(opt.gpu, non_blocking=True)
             # ===================forward=====================
-            feat, _ = model(input) # [bs, 8, 2048]
+            feat_x, _ = model_x(input_x) # [bs, 8, 512]
+            feat_x = feat_x.detach()
+            feat_y, _ = model_y(input_y) # [bs, 8, 512]
+            feat_y = feat_y.detach()
+            feat = torch.cat((feat_x, feat_y), dim=1) # [bs, 8, 1024]
             # feat = torch.cat((feat_l.detach(), feat_ab.detach()), dim=1)
 
             # ===================consensus feature=====================
             consensus = ConsensusModule('avg')
             enc = classifier(feat) # [bs, 8, 120]
+            enc_x = classifier_x(feat_x) # [bs, 8, 120]
+            enc_y = classifier_y(feat_y) # [bs, 8, 120]
             enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
+            enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
+            enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
             output = consensus(enc).squeeze()
+            output_x = consensus(enc_x).squeeze()
+            output_y = consensus(enc_y).squeeze()
             # print (output.size()) # [bs, 120]
             loss = criterion(output, target)
+            loss_x = criterion(output_x, target)
+            loss_y = criterion(output_y, target)
 
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(), input.size(0))
-            top1.update(acc1[0], input.size(0))
-            top5.update(acc5[0], input.size(0))
+            acc1_x, acc5_x = accuracy(output_x, target, topk=(1, 5))
+            acc1_y, acc5_y = accuracy(output_y, target, topk=(1, 5))
+            losses.update(loss.item(), input_x.size(0))
+            losses_x.update(loss_x.item(), input_x.size(0))
+            losses_y.update(loss_y.item(), input_y.size(0))
+            top1.update(acc1[0], input_x.size(0))
+            top1_x.update(acc1_x[0], input_x.size(0))
+            top1_y.update(acc1[0], input_y.size(0))
+            top5.update(acc5[0], input_x.size(0))
+            top5_x.update(acc5_x[0], input_x.size(0))
+            top5_y.update(acc5[0], input_y.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -336,11 +444,26 @@ def validate(val_loader, model, classifier, criterion, opt):
                       'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                        idx, len(val_loader), batch_time=batch_time, loss=losses,
                        top1=top1, top5=top5))
+                print('ViewX: [{0}/{1}]\t'
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                      'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                       idx, len(val_loader), batch_time=batch_time, loss=losses_x,
+                       top1=top1_x, top5=top5_x))
+                print('ViewY: [{0}/{1}]\t'
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                      'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                       idx, len(val_loader), batch_time=batch_time, loss=losses_y,
+                       top1=top1_y, top5=top5_y))
+                print ('')
 
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
 
-    return top1.avg, top5.avg, losses.avg
+    return top1.avg, top5.avg, losses.avg, top1_x.avg, top5_x.avg, losses_x.avg, top1_y.avg, top5_y.avg, losses_y.avg
 
 
 def main():
@@ -357,10 +480,12 @@ def main():
     val_loader, _ = get_train_loader('dev', args)
 
     # set the model
-    model, classifier, criterion = set_model(args)
+    model_x, model_y, classifier_x, classifier_y, classifier, criterion = set_model(args)
 
     # set optimizer
-    optimizer = set_optimizer(args, model, classifier)
+    optimizer = set_optimizer(args, classifier)
+    optimizer_x = set_optimizer(args, classifier_x)
+    optimizer_y = set_optimizer(args, classifier_y)
 
     cudnn.benchmark = True
 
@@ -409,31 +534,49 @@ def main():
         print("==> training...")
 
         time1 = time.time()
-        train_acc, train_acc5, train_loss = train(epoch, train_loader, model, classifier, criterion, optimizer, args)
+        top1.avg, top5.avg, losses.avg, top1_x.avg, top5_x.avg, losses_x.avg, top1_y.avg, top5_y.avg, losses_y.avg = \
+                                                    train(epoch, train_loader, model_x, model_y, \
+                                                    classifier_x, classifier_y, classifier, criterion, optimizer_x, optimizer_y, optimizer, args)
         time2 = time.time()
         print('train epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
-        logger.log_value('train_acc', train_acc, epoch)
-        logger.log_value('train_acc5', train_acc5, epoch)
-        logger.log_value('train_loss', train_loss, epoch)
+        logger.log_value('joint/train_acc', top1, epoch)
+        logger.log_value('joint/train_acc5', top5, epoch)
+        logger.log_value('joint/train_loss', losses, epoch)
+        logger.log_value('x/train_acc', top1_x, epoch)
+        logger.log_value('x/train_acc5', top5_x, epoch)
+        logger.log_value('x/train_loss', losses_x, epoch)
+        logger.log_value('y/train_acc', top1_y, epoch)
+        logger.log_value('y/train_acc5', top5_y, epoch)
+        logger.log_value('y/train_loss', losses_y, epoch)
 
         print("==> testing...")
-        test_acc, test_acc5, test_loss = validate(val_loader, model, classifier, criterion, args)
+        top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
+                                                    validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, args)
 
-        logger.log_value('test_acc', test_acc, epoch)
-        logger.log_value('test_acc5', test_acc5, epoch)
-        logger.log_value('test_loss', test_loss, epoch)
+        logger.log_value('joint/test_acc', top1, epoch)
+        logger.log_value('joint/test_acc5', top5, epoch)
+        logger.log_value('joint/test_loss', losses, epoch)
+        logger.log_value('x/test_acc', top1_x, epoch)
+        logger.log_value('x/test_acc5', top5_x, epoch)
+        logger.log_value('x/test_loss', losses_x, epoch)
+        logger.log_value('y/test_acc', top1_y, epoch)
+        logger.log_value('y/test_acc5', top5_y, epoch)
+        logger.log_value('y/test_loss', losses_y, epoch)
 
         # save the best model
-        if test_acc > best_acc1:
-            best_acc1 = test_acc
+        if top1 > best_acc1:
+            best_acc1 = top1
             state = {
                 'opt': args,
                 'epoch': epoch,
-                'model': model.state_dict(),
                 'classifier': classifier.state_dict(),
+                'classifier_x': classifier_x.state_dict(),
+                'classifier_y': classifier_y.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer': optimizer.state_dict(),
+                'optimizer_x': optimizer_x.state_dict(),
+                'optimizer_y': optimizer_y.state_dict(),
             }
             save_name = '{}_layer{}.pth'.format(args.model, args.layer)
             save_name = os.path.join(args.save_folder, save_name)
@@ -446,12 +589,15 @@ def main():
             state = {
                 'opt': args,
                 'epoch': epoch,
-                'model': model.state_dict(),
                 'classifier': classifier.state_dict(),
-                'best_acc1': test_acc,
+                'classifier_x': classifier_x.state_dict(),
+                'classifier_y': classifier_y.state_dict(),
+                'best_acc1': best_acc1,
                 'optimizer': optimizer.state_dict(),
+                'optimizer_x': optimizer_x.state_dict(),
+                'optimizer_y': optimizer_y.state_dict(),
             }
-            save_name = 'dep_ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
+            save_name = 'rgb_ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
             save_name = os.path.join(args.save_folder, save_name)
             print('saving regular model!')
             torch.save(state, save_name)

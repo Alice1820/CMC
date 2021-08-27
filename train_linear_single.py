@@ -35,12 +35,12 @@ def parse_option():
     parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
     parser.add_argument('--save_freq', type=int, default=5, help='save frequency')
     parser.add_argument('--batch_size', type=int, default=256, help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=16, help='num of workers to use')
+    parser.add_argument('--num_workers', type=int, default=8, help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=60, help='number of training epochs')
 
     # optimization
-    parser.add_argument('--learning_rate', type=float, default=0.1, help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='60, 100, 140', help='where to decay lr, can be a list')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
+    parser.add_argument('--lr_decay_epochs', type=str, default='30,40,50', help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.2, help='decay rate for learning rate')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
     parser.add_argument('--weight_decay', type=float, default=0, help='weight decay')
@@ -55,7 +55,7 @@ def parse_option():
                                                                          'resnet50v1', 'resnet101v1', 'resnet18v1',
                                                                          'resnet50v2', 'resnet101v2', 'resnet18v2',
                                                                          'resnet50v3', 'resnet101v3', 'resnet18v3'])
-    parser.add_argument('--model_path', type=str, default=None, help='the model to test') # baseline training from scratch
+    parser.add_argument('--model_path', type=str, default=None, help='the model to test')
     parser.add_argument('--layer', type=int, default=6, help='which layer to evaluate')
 
     # dataset
@@ -66,7 +66,7 @@ def parse_option():
     parser.add_argument('--num_class', type=int, default=60, help='')
 
     # add new views
-    parser.add_argument('--view', type=str, default='RGBD', choices=['Lab', 'YCbCr', 'RGBD'])
+    parser.add_argument('--view', type=str, default='Lab', choices=['Lab', 'YCbCr'])
 
     # path definition
     parser.add_argument('--data_folder', type=str, default='/data0/xifan/NTU_RGBD_60', help='path to data')
@@ -96,8 +96,8 @@ def parse_option():
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
-    opt.model_name = 'tsm'
-    opt.model_name = 'baseline_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model_name, opt.batch_size, opt.learning_rate,
+    opt.model_name = opt.model_path.split('/')[-2]
+    opt.model_name = 'linear_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model_name, opt.batch_size, opt.learning_rate,
                                                                   opt.weight_decay)
 
     opt.model_name = '{}_view_{}'.format(opt.model_name, opt.view)
@@ -192,12 +192,13 @@ def set_model(args):
 
     model = model.cuda()
     model = nn.DataParallel(model)
-    # # load pre-trained model
-    # print('==> loading pre-trained model')
-    # ckpt = torch.load(args.model_path)
-    # model.load_state_dict(ckpt['model_ab']) # depth
-    # print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
-    # print('==> done')
+    # load pre-trained model
+    print('==> loading pre-trained model')
+    ckpt = torch.load(args.model_path)
+    # model.load_state_dict(ckpt['model_l']) # rgb
+    model.load_state_dict(ckpt['model_ab']) # depth
+    print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
+    print('==> done')
     model.eval()
 
     classifier = nn.Linear(512, 120)
@@ -210,8 +211,8 @@ def set_model(args):
     return model, classifier, criterion
 
 
-def set_optimizer(args, model, classifier):
-    optimizer = optim.Adam(list(model.parameters()) + list(classifier.parameters()),
+def set_optimizer(args, classifier):
+    optimizer = optim.Adam(classifier.parameters(),
                           lr=args.learning_rate,
                           betas=[args.beta1, args.beta2])
     return optimizer
@@ -221,7 +222,7 @@ def train(epoch, train_loader, model, classifier, criterion, optimizer, opt):
     """
     one epoch training
     """
-    model.train()
+    model.eval()
     classifier.train()
 
     batch_time = AverageMeter()
@@ -235,6 +236,7 @@ def train(epoch, train_loader, model, classifier, criterion, optimizer, opt):
         # measure data loading time
         data_time.update(time.time() - end)
 
+        # input = inputs['rgb']
         input = inputs['dep']
         target = inputs['label']
         input = input.float()
@@ -243,8 +245,9 @@ def train(epoch, train_loader, model, classifier, criterion, optimizer, opt):
         target = target.cuda(opt.gpu, non_blocking=True)
 
         # ===================forward=====================
-        feat, _ = model(input) # [bs, 8, 2048]
-            # feat = feat.detach()
+        with torch.no_grad():
+            feat, _ = model(input) # [bs, 8, 2048]
+            feat = feat.detach()
             # feat = torch.cat((feat_l.detach(), feat_ab.detach()), dim=1)
 
         # ===================consensus feature=====================
@@ -302,6 +305,7 @@ def validate(val_loader, model, classifier, criterion, opt):
         for idx, (inputs, index) in enumerate(val_loader):
 
             input = inputs['dep']
+            # input = inputs['rgb']
             target = inputs['label']
             input = input.float()
             if opt.gpu is not None:
@@ -360,7 +364,7 @@ def main():
     model, classifier, criterion = set_model(args)
 
     # set optimizer
-    optimizer = set_optimizer(args, model, classifier)
+    optimizer = set_optimizer(args, classifier)
 
     cudnn.benchmark = True
 
@@ -430,7 +434,6 @@ def main():
             state = {
                 'opt': args,
                 'epoch': epoch,
-                'model': model.state_dict(),
                 'classifier': classifier.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer': optimizer.state_dict(),
@@ -446,12 +449,11 @@ def main():
             state = {
                 'opt': args,
                 'epoch': epoch,
-                'model': model.state_dict(),
                 'classifier': classifier.state_dict(),
                 'best_acc1': test_acc,
                 'optimizer': optimizer.state_dict(),
             }
-            save_name = 'dep_ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
+            save_name = 'rgb_ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
             save_name = os.path.join(args.save_folder, save_name)
             print('saving regular model!')
             torch.save(state, save_name)

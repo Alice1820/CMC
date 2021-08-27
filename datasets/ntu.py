@@ -225,6 +225,7 @@ class NTU(Dataset):
         self.ske_list = []
         self.labels = []
         self.subject_ids = []
+        self.camera_ids = []
 
         if split == 'cross_subject':
             if stage == 'train':
@@ -247,6 +248,8 @@ class NTU(Dataset):
             self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename_rgb)) if
                         f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
             self.subject_ids += [int(f[9:12]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.camera_ids += [int(f[5:8]) for f in sorted(os.listdir(basename_rgb)) if
                         f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
         elif split == 'cross_view':
             if stage == 'train':
@@ -280,9 +283,11 @@ class NTU(Dataset):
         #                 self.rgb_list.pop(i)
         #                 self.labels.pop(i)
 
-        self.rgb_list, self.dep_list, self.labels, self.subject_ids = shuffle(self.rgb_list, self.dep_list, self.labels, self.subject_ids)
+        self.rgb_list, self.dep_list, self.labels, self.subject_ids, self.camera_ids = \
+                            shuffle(self.rgb_list, self.dep_list, self.labels, self.subject_ids, self.camera_ids)
 
         self.transform = (stage in ['train', 'train25', 'train50', 'trainss', 'trains'])
+        # self.transform = (stage in [])
         self.root_dir = root_dir
         self.stage = stage
         self.mode = stage
@@ -299,6 +304,7 @@ class NTU(Dataset):
 
         label = self.labels[idx]
         subject_id = self.subject_ids[idx]
+        camera_id = self.camera_ids[idx]
 
         video = np.zeros([1])
         maps = np.zeros([1])
@@ -312,7 +318,7 @@ class NTU(Dataset):
 
         # video, maps = self.video_transform(self.args, video, maps)
         video = self.video_transform(video) # (32, 256, 310, 3)
-        depth = self.depth_transform(video)
+        depth = self.depth_transform(depth)
         # print (video.shape)
         # print (depth.shape)
         if self.transform:
@@ -320,6 +326,7 @@ class NTU(Dataset):
             depth = self.augmentation(depth)
         else:
             video = self.transformation(video)
+            # print (video.size()) # [8, 3, 224, 224]
             depth = self.transformation(depth)
         sample = {'rgb': video, 'dep': depth, 'label': label - 1, 'subject_id': subject_id - 1}
 
@@ -368,8 +375,14 @@ class NTU(Dataset):
         # np_clip[(np_clip > r_max)] = 0.0
         # np_clip = np_clip - mu
         # np_clip = np_clip / std # -3~3
+        p_min = 500.
+        p_max = 4500.
+        np_clip[(np_clip < p_min)] = 0.0
+        np_clip[(np_clip > p_max)] = 0.0
+        np_clip -= 2500.
+        np_clip /= 2000.
         # repeat to BGR to fit pretrained resnet parameters
-        # np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
+        np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
 
         return np_clip
     
