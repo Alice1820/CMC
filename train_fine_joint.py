@@ -61,14 +61,14 @@ def parse_option():
     parser.add_argument('--layer', type=int, default=6, help='which layer to evaluate')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet100', 'imagenet'])
+    parser.add_argument('--dataset', type=str, default='train25', choices=['train100', 'train25', 'train50'])
 
     # video
     parser.add_argument('--num_segments', type=int, default=8, help='')
     parser.add_argument('--num_class', type=int, default=60, help='')
 
     # add new views
-    parser.add_argument('--view', type=str, default='Lab', choices=['Lab', 'YCbCr'])
+    parser.add_argument('--view', type=str, default='RGBD', choices=['Lab', 'YCbCr', 'RGBD'])
 
     # path definition
     parser.add_argument('--data_folder', type=str, default='/data0/xifan/NTU_RGBD_60', help='path to data')
@@ -99,7 +99,7 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
 
     # opt.model_name = opt.model_path.split('/')[-2]
-    opt.model_name = 'linear_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model, opt.batch_size, opt.learning_rate,
+    opt.model_name = 'fine_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model, opt.batch_size_glb, opt.learning_rate,
                                                                   opt.weight_decay)
 
     opt.model_name = '{}_view_{}'.format(opt.model_name, opt.view)
@@ -210,7 +210,7 @@ def set_model(args):
     model_y = nn.DataParallel(model_y)
     if args.model_path:
         # load pre-trained model
-        print('==> loading pre-trained model')
+        print('==> loading pre-trained cmc model')
         ckpt = torch.load(args.model_path)
         model_x.load_state_dict(ckpt['model_l']) # rgb
         model_y.load_state_dict(ckpt['model_ab']) # depth
@@ -238,7 +238,11 @@ def set_model(args):
 
 
 def set_optimizer_joint(args, model, classifier):
-    optimizer = optim.Adam(list(classifier.parameters()) + list(model.parameters()),
+    # set different learnint rate for different modules
+    optimizer = optim.Adam([
+                           {'params': model.parameters(), 'lr': 2e-4},
+                           {'params': classifier.parameters()}
+                            ],
                           lr=args.learning_rate,
                           betas=[args.beta1, args.beta2])
     return optimizer
@@ -273,6 +277,9 @@ def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, cla
     top5_y = AverageMeter()
 
     end = time.time()
+    optimizer.zero_grad()
+    optimizer_x.zero_grad()
+    optimizer_y.zero_grad()
     for idx, (inputs, index) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
@@ -289,23 +296,28 @@ def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, cla
 
         # ===================forward=====================
         # with torch.no_grad():
-        feat_x, _ = model_x(input_x) # [bs, 8, 512]
-        feat_x = feat_x.detach()
-        feat_y, _ = model_y(input_y) # [bs, 8, 512]
-        feat_y = feat_y.detach()
-        feat = torch.cat((feat_x, feat_y), dim=1) # [bs, 8, 1024]
+        feat_x, _ = model_x(input_x) # [bs, 8, 512] or [bs, 2048]
+        feat_y, _ = model_y(input_y) # [bs, 8, 512] or [bs, 2048]
+        feat = torch.cat((feat_x.detach(), feat_y.detach()), dim=1) # [bs, 8, 1024]
+        # print (feat_x.size())
+        # print (feat_y.size())
 
         # ===================consensus feature=====================
-        consensus = ConsensusModule('avg')
-        enc = classifier(feat) # [bs, 8, 120]
-        enc_x = classifier_x(feat_x) # [bs, 8, 120]
-        enc_y = classifier_y(feat_y) # [bs, 8, 120]
-        enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
-        enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
-        enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
-        output = consensus(enc).squeeze()
-        output_x = consensus(enc_x).squeeze()
-        output_y = consensus(enc_y).squeeze()
+        if opt.model == 'tsm':
+            consensus = ConsensusModule('avg')
+            enc = classifier(feat) # [bs, 8, 120]
+            enc_x = classifier_x(feat_x) # [bs, 8, 120]
+            enc_y = classifier_y(feat_y) # [bs, 8, 120]
+            enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
+            enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
+            enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
+            output = consensus(enc).squeeze()
+            output_x = consensus(enc_x).squeeze()
+            output_y = consensus(enc_y).squeeze()
+        elif opt.model == 'i3d':
+            output = classifier(feat) # [bs, 120]
+            output_x = classifier_x(feat_x) # [bs, 120]
+            output_y = classifier_y(feat_y) # [bs, 120]
         # print (output.size()) # [bs, 120]
         loss = criterion(output, target)
         loss_x = criterion(output_x, target)
@@ -325,16 +337,16 @@ def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, cla
         top5_y.update(acc5_y[0], input_y.size(0))
 
         # ===================backward=====================
-        optimizer.zero_grad()
-        optimizer_x.zero_grad()
-        optimizer_y.zero_grad()
         loss.backward()
         loss_x.backward()
         loss_y.backward()
-        optimizer.step()
-        optimizer_x.step()
-        optimizer_y.step()
-
+        if idx % 8 == 0:
+            optimizer.step()
+            optimizer_x.step()
+            optimizer_y.step()
+            optimizer.zero_grad()
+            optimizer_x.zero_grad()
+            optimizer_y.zero_grad()
         # ===================meters=====================
         batch_time.update(time.time() - end)
         end = time.time()
@@ -415,16 +427,21 @@ def validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifie
             feat = torch.cat((feat_x.detach(), feat_y.detach()), dim=1) # [bs, 8, 1024]
 
             # ===================consensus feature=====================
-            consensus = ConsensusModule('avg')
-            enc = classifier(feat) # [bs, 8, 120]
-            enc_x = classifier_x(feat_x) # [bs, 8, 120]
-            enc_y = classifier_y(feat_y) # [bs, 8, 120]
-            enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
-            enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
-            enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
-            output = consensus(enc).squeeze()
-            output_x = consensus(enc_x).squeeze()
-            output_y = consensus(enc_y).squeeze()
+            if opt.model == 'tsm':
+                consensus = ConsensusModule('avg')
+                enc = classifier(feat) # [bs, 8, 120]
+                enc_x = classifier_x(feat_x) # [bs, 8, 120]
+                enc_y = classifier_y(feat_y) # [bs, 8, 120]
+                enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
+                enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
+                enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
+                output = consensus(enc).squeeze()
+                output_x = consensus(enc_x).squeeze()
+                output_y = consensus(enc_y).squeeze()
+            elif opt.model == 'i3d':
+                output = classifier(feat) # [bs, 120]
+                output_x = classifier_x(feat_x) # [bs, 120]
+                output_y = classifier_y(feat_y) # [bs, 120]
             # print (output.size()) # [bs, 120]
             loss = criterion(output, target)
             loss_x = criterion(output_x, target)
@@ -490,9 +507,10 @@ def main():
     # train_loader, n_data = get_train_loader('train', args)
     # val_loader, _ = get_train_loader('dev', args)
         # set the loader
-    train_loader, n_data = get_dataloaders(args=args, stage='train')
+    train100_loader, n_data = get_dataloaders(args=args, stage='train')
     train25_loader, n_data = get_dataloaders(args=args, stage='train25')
     train50_loader, n_data = get_dataloaders(args=args, stage='train50')
+    train_loader = {'train100': train100_loader, 'train25': train25_loader, 'train50': train50_loader}[args.dataset]
     eval_loader, _ = get_dataloaders(args=args, stage='dev')
     test_loader, _ = get_dataloaders(args=args, stage='test')
     # set the model
@@ -551,7 +569,7 @@ def main():
 
         time1 = time.time()
         top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
-                                                    train(epoch, train25_loader, model_x, model_y, \
+                                                    train(epoch, train_loader, model_x, model_y, \
                                                     classifier_x, classifier_y, classifier, criterion, optimizer_x, optimizer_y, optimizer, args)
         time2 = time.time()
         print('train epoch {}, total time {:.2f}'.format(epoch, time2 - time1))

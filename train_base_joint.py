@@ -35,7 +35,8 @@ def parse_option():
     parser.add_argument('--print_freq', type=int, default=10, help='print frequency')
     parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
     parser.add_argument('--save_freq', type=int, default=5, help='save frequency')
-    parser.add_argument('--batch_size', type=int, default=256, help='batch_size')
+    parser.add_argument('--batch_size', type=int, default=8, help='batch_size')
+    parser.add_argument('--batch_size_glb', type=int, default=64, help='batch_size')
     parser.add_argument('--num_workers', type=int, default=8, help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=60, help='number of training epochs')
 
@@ -61,7 +62,7 @@ def parse_option():
     parser.add_argument('--layer', type=int, default=6, help='which layer to evaluate')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet100', 'imagenet'])
+    parser.add_argument('--dataset', type=str, default='train25', choices=['train100', 'train25', 'train50'])
 
     # video
     parser.add_argument('--num_segments', type=int, default=8, help='')
@@ -93,13 +94,15 @@ def parse_option():
         if 'alexnet' not in opt.model:
             opt.crop_low = 0.08
 
+    opt.accum = int(opt.batch_size_glb / opt.batch_size)
+
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
     # opt.model_name = opt.model_path.split('/')[-2]
-    opt.model_name = 'base_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model, opt.batch_size, opt.learning_rate,
+    opt.model_name = 'base_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model, opt.batch_size_glb, opt.learning_rate,
                                                                   opt.weight_decay)
 
     opt.model_name = '{}_view_{}'.format(opt.model_name, opt.view)
@@ -272,6 +275,9 @@ def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, cla
     top5_x = AverageMeter()
     top5_y = AverageMeter()
 
+    optimizer.zero_grad()
+    optimizer_x.zero_grad()
+    optimizer_y.zero_grad()
     end = time.time()
     for idx, (inputs, index) in enumerate(train_loader):
         # measure data loading time
@@ -294,16 +300,21 @@ def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, cla
         feat = torch.cat((feat_x.detach(), feat_y.detach()), dim=1) # [bs, 8, 1024]
 
         # ===================consensus feature=====================
-        consensus = ConsensusModule('avg')
-        enc = classifier(feat) # [bs, 8, 120]
-        enc_x = classifier_x(feat_x) # [bs, 8, 120]
-        enc_y = classifier_y(feat_y) # [bs, 8, 120]
-        enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
-        enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
-        enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
-        output = consensus(enc).squeeze()
-        output_x = consensus(enc_x).squeeze()
-        output_y = consensus(enc_y).squeeze()
+        if opt.model == 'tsm':
+            consensus = ConsensusModule('avg')
+            enc = classifier(feat) # [bs, 8, 120]
+            enc_x = classifier_x(feat_x) # [bs, 8, 120]
+            enc_y = classifier_y(feat_y) # [bs, 8, 120]
+            enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
+            enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
+            enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
+            output = consensus(enc).squeeze()
+            output_x = consensus(enc_x).squeeze()
+            output_y = consensus(enc_y).squeeze()
+        elif opt.model == 'i3d':
+            output = classifier(feat) # [bs, 120]
+            output_x = classifier_x(feat_x) # [bs, 120]
+            output_y = classifier_y(feat_y) # [bs, 120]
         # print (output.size()) # [bs, 120]
         loss = criterion(output, target)
         loss_x = criterion(output_x, target)
@@ -323,22 +334,23 @@ def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, cla
         top5_y.update(acc5_y[0], input_y.size(0))
 
         # ===================backward=====================
-        optimizer.zero_grad()
-        optimizer_x.zero_grad()
-        optimizer_y.zero_grad()
         loss.backward()
         loss_x.backward()
         loss_y.backward()
-        optimizer.step()
-        optimizer_x.step()
-        optimizer_y.step()
+        if idx % opt.accum == 0:
+            optimizer.step()
+            optimizer_x.step()
+            optimizer_y.step()
+            optimizer.zero_grad()
+            optimizer_x.zero_grad()
+            optimizer_y.zero_grad()
 
         # ===================meters=====================
         batch_time.update(time.time() - end)
         end = time.time()
 
         # print info
-        if idx % opt.print_freq == 0:
+        if idx % (opt.print_freq * opt.accum) == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -416,16 +428,21 @@ def validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifie
             # feat = torch.cat((feat_l.detach(), feat_ab.detach()), dim=1)
 
             # ===================consensus feature=====================
-            consensus = ConsensusModule('avg')
-            enc = classifier(feat) # [bs, 8, 120]
-            enc_x = classifier_x(feat_x) # [bs, 8, 120]
-            enc_y = classifier_y(feat_y) # [bs, 8, 120]
-            enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
-            enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
-            enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
-            output = consensus(enc).squeeze()
-            output_x = consensus(enc_x).squeeze()
-            output_y = consensus(enc_y).squeeze()
+            if opt.model == 'tsm':
+                consensus = ConsensusModule('avg')
+                enc = classifier(feat) # [bs, 8, 120]
+                enc_x = classifier_x(feat_x) # [bs, 8, 120]
+                enc_y = classifier_y(feat_y) # [bs, 8, 120]
+                enc = enc.view((-1, opt.num_segments) + enc.size()[1:])
+                enc_x = enc_x.view((-1, opt.num_segments) + enc_x.size()[1:])
+                enc_y = enc_y.view((-1, opt.num_segments) + enc_y.size()[1:])
+                output = consensus(enc).squeeze()
+                output_x = consensus(enc_x).squeeze()
+                output_y = consensus(enc_y).squeeze()
+            elif opt.model == 'i3d':
+                output = classifier(feat) # [bs, 120]
+                output_x = classifier_x(feat_x) # [bs, 120]
+                output_y = classifier_y(feat_y) # [bs, 120]
             # print (output.size()) # [bs, 120]
             loss = criterion(output, target)
             loss_x = criterion(output_x, target)
@@ -491,9 +508,10 @@ def main():
     # train_loader, n_data = get_train_loader('train', args)
     # val_loader, _ = get_train_loader('dev', args)
         # set the loader
-    train_loader, n_data = get_dataloaders(args=args, stage='train')
+    train100_loader, n_data = get_dataloaders(args=args, stage='train')
     train25_loader, n_data = get_dataloaders(args=args, stage='train25')
     train50_loader, n_data = get_dataloaders(args=args, stage='train50')
+    train_loader = {'train100': train100_loader, 'train25': train25_loader, 'train50': train50_loader}[args.dataset]
     eval_loader, _ = get_dataloaders(args=args, stage='dev')
     test_loader, _ = get_dataloaders(args=args, stage='test')
     # set the model
