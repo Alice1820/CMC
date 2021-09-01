@@ -660,12 +660,13 @@ class TSN(nn.Module):
 
     def forward(self, input, no_reshape=False):
         # Changing temporal and channel dim to fit the inflated resnet input requirements
-        # B, T, W, H, C = input.size()
+        B, T, W, H, C = input.size()
         # input = input.view(B, 1, T, W, H, C)
         # input = input.transpose(1, -1)
         # input = input.view(B, C, T, W, H)
         # input = input.transpose(1, 2)
         # input = input.contiguous()
+        # print (input.size()) # B, T, C, W, H
         # print (input.size()) # B, T, C, W, H
         if not no_reshape:
             sample_len = (3 if self.modality == "RGB" else 2) * self.new_length

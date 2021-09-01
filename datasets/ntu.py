@@ -111,9 +111,24 @@ class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""
 
     def __call__(self, sample):
-        rgb, skel, label = sample['rgb'], sample['ske'], sample['label']
-        return {'rgb': torch.from_numpy(rgb.astype(np.float32)),
-                'ske': torch.from_numpy(skel.astype(np.float32)),
+        rgb, dep = sample['rgb'], sample['dep']
+        subject_id, label = sample['subject_id'], sample['label']
+
+        rgb = torch.from_numpy(rgb.astype(np.float32))
+        T, W, H, C = rgb.size()
+        rgb = rgb.view(T, 1, W, H, C)
+        rgb = rgb.transpose(1, -1)
+        rgb = rgb.squeeze().contiguous()
+
+        dep = torch.from_numpy(dep.astype(np.float32))
+        T, W, H, C = dep.size()
+        dep = dep.view(T, 1, W, H, C)
+        dep = dep.transpose(1, -1)
+        dep = dep.squeeze().contiguous()
+
+        return {'rgb': rgb,
+                'dep': dep,
+                'subject_id': torch.from_numpy(np.asarray(subject_id)),
                 'label': torch.from_numpy(np.asarray(label))}
 
 
@@ -125,17 +140,21 @@ class NormalizeLen(object):
         self.vid_len = vid_len
 
     def __call__(self, sample):
-        rgb, skel, label = sample['rgb'], sample['ske'], sample['label']
+        rgb, dep = sample['rgb'], sample['dep']
+        subject_id, label = sample['subject_id'], sample['label']
         if rgb.shape[0] != 1:
             num_frames_rgb = len(rgb)
             indices_rgb = np.linspace(0, num_frames_rgb - 1, self.vid_len[0]).astype(int)
             rgb = rgb[indices_rgb, :, :, :]
-        if skel.shape[0] != 1:
-            num_frames_skel = skel.shape[1]
-            skel = interpole(skel, num_frames_skel, self.vid_len[1])
+        
+        if dep.shape[0] != 1:
+            num_frames_dep = len(dep)
+            indices_dep = np.linspace(0, num_frames_dep - 1, self.vid_len[0]).astype(int)
+            dep = dep[indices_dep, :, :, :]
 
         return {'rgb': rgb,
-                'ske': skel,
+                'dep': dep,
+                'subject_id': subject_id,
                 'label': label}
 
 
@@ -158,18 +177,21 @@ class CenterCrop(object):
         self.p_interval = p_interval
 
     def __call__(self, sample):
-        rgb, skel, label = sample['rgb'], sample['ske'], sample['label']
-        if skel.shape[0] != 1:
-            valid_size = skel.shape[1]
-            bias = int((1 - self.p_interval) * valid_size / 2)
-            skel = skel[:, bias:valid_size - bias, :, :]
-
+        rgb, dep = sample['rgb'], sample['dep']
+        subject_id, label = sample['subject_id'], sample['label']
         if rgb.shape[0] != 1:
             num_frames_rgb = len(rgb)
             bias = int((1 - self.p_interval) * num_frames_rgb / 2)
             rgb = rgb[bias:num_frames_rgb - bias, :, :, :]
+
+        if dep.shape[0] != 1:
+            num_frames_dep = len(dep)
+            bias = int((1 - self.p_interval) * num_frames_dep / 2)
+            dep = dep[bias:num_frames_dep - bias, :, :, :]
+
         return {'rgb': rgb,
-                'ske': skel,
+                'dep': dep,
+                'subject_id': subject_id,
                 'label': label}
 
 
@@ -180,24 +202,81 @@ class AugCrop(object):
         self.p_interval = p_interval
 
     def __call__(self, sample):
-        rgb, skel, label = sample['rgb'], sample['ske'], sample['label']
+        rgb, dep = sample['rgb'], sample['dep']
+        subject_id, label = sample['subject_id'], sample['label']
         ratio = (1.0 - self.p_interval * np.random.rand())
         if rgb.shape[0] != 1:
             num_frames_rgb = len(rgb)
             begin_rgb = (num_frames_rgb - int(num_frames_rgb * ratio)) // 2
             rgb = rgb[begin_rgb:(num_frames_rgb - begin_rgb), :, :, :]
 
-        if skel.shape[0] != 1:
-            valid_size = skel.shape[1]
-            p = np.random.rand(1) * (1.0 - self.p_interval) + self.p_interval
-            cropped_length = np.minimum(np.maximum(int(np.floor(valid_size * p)), 64), valid_size)
-            bias = np.random.randint(0, valid_size - cropped_length + 1)
-            skel = skel[:, bias:bias + cropped_length, :, :]
+        if dep.shape[0] != 1:
+            num_frames_dep = len(dep)
+            begin_dep = (num_frames_dep - int(num_frames_dep * ratio)) // 2
+            dep = dep[begin_dep:(num_frames_dep - begin_dep), :, :, :]
 
         return {'rgb': rgb,
-                'ske': skel,
+                'dep': dep,
+                'subject_id': subject_id,
                 'label': label}
 
+
+def video_transform(self, np_clip):
+    # if args.modality == "rgb" or args.modality == "both":
+    # Div by 255
+    np_clip /= 255.
+
+    # Normalization
+    np_clip -= np.asarray([0.485, 0.456, 0.406]).reshape(1, 1, 3)  # mean
+    np_clip /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
+
+    return np_clip
+
+def depth_transform(self, np_clip):
+    ####### depth ######
+    # histogram, fit the first frame of each video to a gauss distribution
+    # frame = np_clip[0, :, :]
+    # data = np.reshape(frame, [frame.size])
+    # data = data[(data >= 500) * (data <= 4500)] # range for skeleton detection
+    # mu, std = norm.fit(data)
+    # print (mu, std)
+    # # select certain range
+    # r_min = mu - std
+    # r_max = mu + std
+    # np_clip[(np_clip < r_min)] = 0.0
+    # np_clip[(np_clip > r_max)] = 0.0
+    # np_clip = np_clip - mu
+    # np_clip = np_clip / std # -3~3
+    p_min = 500.
+    p_max = 4500.
+    np_clip[(np_clip < p_min)] = 0.0
+    np_clip[(np_clip > p_max)] = 0.0
+    np_clip -= 2500.
+    np_clip /= 2000.
+    # repeat to BGR to fit pretrained resnet parameters
+    np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
+
+    return np_clip
+
+def get_dataloaders(args=None, stage='train'):
+    import torchvision.transforms as transforms
+    from datasets import ntu as d
+    from torch.utils.data import DataLoader
+
+    if stage == 'train':
+        # Handle data
+        transformer = transforms.Compose([AugCrop(), NormalizeLen((args.num_segments, args.num_segments)), ToTensor()])
+    else:
+        transformer = transforms.Compose([NormalizeLen((args.num_segments, args.num_segments)), ToTensor()])
+    
+    dataset = NTUV2(args.data_folder, transform=transformer, stage=stage, args=args)
+
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                 drop_last=False, pin_memory=True)
+    n_data = len(dataset)
+    print('number of samples: {}'.format(n_data))
+
+    return dataloader, n_data
 
 # %%
 class NTU(Dataset):
@@ -329,6 +408,10 @@ class NTU(Dataset):
             # print (video.size()) # [8, 3, 224, 224]
             depth = self.transformation(depth)
         sample = {'rgb': video, 'dep': depth, 'label': label - 1, 'subject_id': subject_id - 1}
+        
+        # print (torch.max(depth), 'torch max')
+        # print (torch.min(depth), 'torch min')
+        # print (torch.mean(depth), 'torch mean')
 
         return sample, idx
 
@@ -375,12 +458,18 @@ class NTU(Dataset):
         # np_clip[(np_clip > r_max)] = 0.0
         # np_clip = np_clip - mu
         # np_clip = np_clip / std # -3~3
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
         p_min = 500.
         p_max = 4500.
         np_clip[(np_clip < p_min)] = 0.0
         np_clip[(np_clip > p_max)] = 0.0
         np_clip -= 2500.
         np_clip /= 2000.
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
         # repeat to BGR to fit pretrained resnet parameters
         np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
 
@@ -426,6 +515,183 @@ class NTU(Dataset):
 
     def ToTensor(self, vid):
         return torch.stack([transforms.ToTensor()(x) for x in vid])
+
+
+class NTUV2(Dataset):
+
+    def __init__(self, root_dir='',  # /data0/xifan/NTU_RGBD_60
+                 split='cross_subject', # 40 subject, 3 camera
+                 stage='train',
+                 transform=None,
+                 vid_len=(8, 8),
+                 vid_dim=256,
+                 vid_fr=30,
+                 args=None):
+        """
+        Args:
+            root_dir (string): Directory where data is.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        basename_rgb = os.path.join(root_dir, 'nturgbd_rgb/avi_310x256_30') 
+        basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/dep_310*256')
+    
+        self.vid_len = vid_len
+
+        self.rgb_list = []
+        self.dep_list = []
+        self.ske_list = []
+        self.labels = []
+        self.subject_ids = []
+        self.camera_ids = []
+
+        if split == 'cross_subject':
+            if stage == 'train':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
+            elif stage == 'train25':
+                subjects = [1, 4, 8, 13]
+            elif stage == 'train50':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18]
+            elif stage == 'trainexp':
+                subjects = [1, 4, 8, 13, 15, 17, 19]
+            elif stage == 'test':
+                subjects = [3, 6, 7, 10, 11, 12, 20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 36, 37, 39, 40]
+            elif stage == 'dev':  # smaller train datase for exploration
+                subjects = [2, 5, 9, 14]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if
+                          f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[9:12]) in subjects]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.subject_ids += [int(f[9:12]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.camera_ids += [int(f[5:8]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+        elif split == 'cross_view':
+            if stage == 'train':
+                cameras = [2, 3]
+            elif stage == 'trainss':  # self-supervised training
+                cameras = [2, 3]
+                # cameras = [3]
+            elif stage == 'trains':
+                cameras = [2]
+            elif stage == 'test':
+                cameras = [1]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if 
+                            f.split(".")[-1] == "avi" and int(f[5:8]) in cameras]
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[5:8]) in cameras]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename)) if int(f[5:8]) in cameras]
+        else:
+            raise Exception('wrong mode: ' + args.mode)
+        # basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/310x256_{1}')
+        # basename_ske = os.path.join(root_dir, 'nturgbd_skeletons')
+
+        # self.original_w, self.original_h = 1920, 1080
+
+        # if args.no_bad_skel:
+        #     with open("bad_skel.txt", "r") as f:
+        #         for line in f.readlines():
+        #             if os.path.join(basename_ske, line[:-1] + ".skeleton") in self.ske_list:
+        #                 i = self.ske_list.index(os.path.join(basename_ske, line[:-1] + ".skeleton"))
+        #                 self.ske_list.pop(i)
+        #                 self.rgb_list.pop(i)
+        #                 self.labels.pop(i)
+
+        self.rgb_list, self.dep_list, self.labels, self.subject_ids, self.camera_ids = \
+                            shuffle(self.rgb_list, self.dep_list, self.labels, self.subject_ids, self.camera_ids)
+
+        self.transform = transform
+        self.root_dir = root_dir
+        self.stage = stage
+        self.args = args
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+
+        rgbpath = self.rgb_list[idx]
+        deppath = self.dep_list[idx]
+
+        label = self.labels[idx]
+        subject_id = self.subject_ids[idx]
+        camera_id = self.camera_ids[idx]
+
+        video = np.zeros([1])
+        maps = np.zeros([1])
+        # skeleton = np.zeros([1])
+
+        # if self.args.modality == "rgb" or self.args.modality == "both":
+        video = load_video(rgbpath)
+        depth = load_depth(deppath)
+        # if self.args.modality == "skeleton" or self.args.modality == "both":
+        #     skeleton = get_3D_skeleton(skepath)
+
+        # video, maps = self.video_transform(self.args, video, maps)
+        video = self.video_transform(video) # (32, 256, 310, 3)
+        depth = self.depth_transform(depth)
+        # print (video.shape)
+        # print (depth.shape)
+        sample = {'rgb': video, 'dep': depth, 'label': label - 1, 'subject_id': subject_id - 1}
+        
+        # print (torch.max(depth), 'torch max')
+        # print (torch.min(depth), 'torch min')
+        # print (torch.mean(depth), 'torch mean')
+        if self.transform:
+            sample = self.transform(sample)
+
+        # print (torch.max(depth), 'torch max')
+        # print (torch.min(depth), 'torch min')
+        # print (torch.mean(depth), 'torch mean')
+        return sample, idx
+
+    def video_transform(self, np_clip):
+        # if args.modality == "rgb" or args.modality == "both":
+        # Div by 255
+        np_clip /= 255.
+
+        # Normalization
+        np_clip -= np.asarray([0.485, 0.456, 0.406]).reshape(1, 1, 3)  # mean
+        np_clip /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
+
+        return np_clip
+
+    def depth_transform(self, np_clip):
+        ####### depth ######
+        # histogram, fit the first frame of each video to a gauss distribution
+        # frame = np_clip[0, :, :]
+        # data = np.reshape(frame, [frame.size])
+        # data = data[(data >= 500) * (data <= 4500)] # range for skeleton detection
+        # mu, std = norm.fit(data)
+        # print (mu, std)
+        # # select certain range
+        # r_min = mu - std
+        # r_max = mu + std
+        # np_clip[(np_clip < r_min)] = 0.0
+        # np_clip[(np_clip > r_max)] = 0.0
+        # np_clip = np_clip - mu
+        # np_clip = np_clip / std # -3~3
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
+        p_min = 500.
+        p_max = 4500.
+        np_clip[(np_clip < p_min)] = 0.0
+        np_clip[(np_clip > p_max)] = 0.0
+        np_clip -= 2500.
+        np_clip /= 2000.
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
+        # repeat to BGR to fit pretrained resnet parameters
+        np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
+
+        return np_clip
+
 # %%
 import argparse
 

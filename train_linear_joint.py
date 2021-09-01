@@ -22,7 +22,7 @@ from models.resnet import MyResNetsCMC
 from models.LinearModel import LinearClassifierAlexNet, LinearClassifierResNet
 from models.tsm import MyTSMCMC, TSN, ConsensusModule
 
-from datasets.ntu import NTU
+from datasets.ntu import NTU, get_dataloaders
 
 # from spawn import spawn
 
@@ -305,10 +305,10 @@ def train(epoch, train_loader, model_x, model_y, classifier_x, classifier_y, cla
         losses_y.update(loss_y.item(), input_y.size(0))
         top1.update(acc1[0], input_x.size(0))
         top1_x.update(acc1_x[0], input_x.size(0))
-        top1_y.update(acc1[0], input_y.size(0))
+        top1_y.update(acc1_y[0], input_y.size(0))
         top5.update(acc5[0], input_x.size(0))
         top5_x.update(acc5_x[0], input_x.size(0))
-        top5_y.update(acc5[0], input_y.size(0))
+        top5_y.update(acc5_y[0], input_y.size(0))
 
         # ===================backward=====================
         optimizer.zero_grad()
@@ -427,10 +427,10 @@ def validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifie
             losses_y.update(loss_y.item(), input_y.size(0))
             top1.update(acc1[0], input_x.size(0))
             top1_x.update(acc1_x[0], input_x.size(0))
-            top1_y.update(acc1[0], input_y.size(0))
+            top1_y.update(acc1_y[0], input_y.size(0))
             top5.update(acc5[0], input_x.size(0))
             top5_x.update(acc5_x[0], input_x.size(0))
-            top5_y.update(acc5[0], input_y.size(0))
+            top5_y.update(acc5_y[0], input_y.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -476,9 +476,12 @@ def main():
         print("Use GPU: {} for training".format(args.gpu))
 
     # set the data loader
-    train_loader, n_data = get_train_loader('train', args)
-    val_loader, _ = get_train_loader('dev', args)
-
+    # train_loader, n_data = get_train_loader('train', args)
+    # val_loader, _ = get_train_loader('dev', args)
+        # set the loader
+    train_loader, n_data = get_dataloaders(args=args, stage='train')
+    eval_loader, _ = get_dataloaders(args=args, stage='dev')
+    test_loader, _ = get_dataloaders(args=args, stage='test')
     # set the model
     model_x, model_y, classifier_x, classifier_y, classifier, criterion = set_model(args)
 
@@ -501,26 +504,13 @@ def main():
                 # best_acc1 may be from a checkpoint from a different GPU
                 best_acc1 = best_acc1.to(args.gpu)
             classifier.load_state_dict(checkpoint['classifier'])
+            classifier_x.load_state_dict(checkpoint['classifier_x'])
+            classifier_y.load_state_dict(checkpoint['classifier_y'])
             optimizer.load_state_dict(checkpoint['optimizer'])
+            optimizer_x.load_state_dict(checkpoint['optimizer_x'])
+            optimizer_y.load_state_dict(checkpoint['optimizer_y'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-
-    args.start_epoch = 1
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location='cpu')
-            args.start_epoch = checkpoint['epoch'] + 1
-            classifier.load_state_dict(checkpoint['classifier'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            best_acc1 = checkpoint['best_acc1']
-            best_acc1 = best_acc1.cuda()
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-            del checkpoint
-            torch.cuda.empty_cache()
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
@@ -534,7 +524,7 @@ def main():
         print("==> training...")
 
         time1 = time.time()
-        top1.avg, top5.avg, losses.avg, top1_x.avg, top5_x.avg, losses_x.avg, top1_y.avg, top5_y.avg, losses_y.avg = \
+        top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
                                                     train(epoch, train_loader, model_x, model_y, \
                                                     classifier_x, classifier_y, classifier, criterion, optimizer_x, optimizer_y, optimizer, args)
         time2 = time.time()
@@ -552,7 +542,7 @@ def main():
 
         print("==> testing...")
         top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
-                                                    validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, args)
+                                                    validate(eval_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, args)
 
         logger.log_value('joint/test_acc', top1, epoch)
         logger.log_value('joint/test_acc5', top5, epoch)

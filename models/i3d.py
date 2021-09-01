@@ -102,10 +102,13 @@ class I3D(nn.Module):
 
     def forward(self, x):
         # Changing temporal and channel dim to fit the inflated resnet input requirements
-        B, T, W, H, C = x.size()
-        x = x.view(B, 1, T, W, H, C)
-        x = x.transpose(1, -1)
-        x = x.view(B, C, T, W, H)
+        # print (x.size())
+        # B, T, W, H, C = x.size()
+        B, T, C, W, H = x.size()
+        # x = x.view(B, 1, T, W, H, C)
+        # x = x.transpose(1, -1)
+        # x = x.view(B, C, T, W, H)
+        x = x.transpose(1, 2)
         x = x.contiguous()
 
         # Inflated ResNet
@@ -115,7 +118,7 @@ class I3D(nn.Module):
         out_5 = self.temporal_pooling(out_4)
         out_6 = self.classifier(out_5)
 
-        return out_6
+        return out_5, out_6
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',

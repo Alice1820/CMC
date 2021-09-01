@@ -23,14 +23,14 @@ from util import adjust_learning_rate, AverageMeter
 
 from models.alexnet import MyAlexNetCMC
 from models.resnet import MyResNetsCMC
-from models.i3d import MyI3DCMC
+from models.i3d import MyI3DCMC, I3D
 from models.tsm import MyTSMCMC, TSN, ConsensusModule
 from NCE.NCEAverage import NCEAverage
 from NCE.NCECriterion import NCECriterion
 from NCE.NCECriterion import NCESoftmaxLoss
 
 from datasets.dataset import ImageFolderInstance
-from datasets.ntu import NTU
+from datasets.ntu import NTU, get_dataloaders
 
 try:
     from apex import amp, optimizers
@@ -55,7 +55,7 @@ def parse_option():
     # optimization
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
     parser.add_argument('--lr_decay_epochs', type=str, default='120,160,200', help='where to decay lr, can be a list')
-    parser.add_argument('--lr_decay_rate', type=float, default=1.0, help='decay rate for learning rate')
+    parser.add_argument('--lr_decay_rate', type=float, default=0.2, help='decay rate for learning rate')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam')
     parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for Adam')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight decay')
@@ -63,13 +63,14 @@ def parse_option():
 
     # resume path
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                        help='path to latest checkpoint (default: none)')
+                        help='path to latest checkpoint (default: none)')   
 
     # model definition
     parser.add_argument('--model', type=str, default='tsm', choices=['alexnet',
                                                                          'resnet50v1', 'resnet101v1', 'resnet18v1',
                                                                          'resnet50v2', 'resnet101v2', 'resnet18v2',
-                                                                         'resnet50v3', 'resnet101v3', 'resnet18v3'])
+                                                                         'resnet50v3', 'resnet101v3', 'resnet18v3',
+                                                                         'tsm', 'i3d'])
     parser.add_argument('--base_model', type=str, default='resnet18')
     parser.add_argument('--softmax', action='store_true', help='using softmax contrastive loss rather than NCE')
     parser.add_argument('--nce_k', type=int, default=511)
@@ -117,7 +118,7 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
 
     opt.method = 'softmax' if opt.softmax else 'nce'
-    opt.model_name = 'cmc5_{}_{}_{}_lr_{}_decay_{}_bsz_{}'.format(opt.method, opt.nce_k, opt.model, opt.learning_rate,
+    opt.model_name = 'cmc_{}_{}_{}_lr_{}_decay_{}_bsz_{}'.format(opt.method, opt.nce_k, opt.model, opt.learning_rate,
                                                                     opt.weight_decay, opt.batch_size)
 
     if opt.amp:
@@ -181,13 +182,18 @@ def get_train_loader(split='train', args=None):
 
 def set_model(args, n_data):
     # set the model
-    model_l  = TSN()
-    model_ab  = TSN()
-
-    # encoder_l = nn.Linear(2048, args.feat_dim) # [2048, 128]
-    encoder_l = nn.Linear(512, args.feat_dim) # [2048, 128]
-    # encoder_ab = nn.Linear(2048, args.feat_dim)
-    encoder_ab = nn.Linear(512, args.feat_dim)
+    if args.model == 'tsm':
+        model_l  = TSN()
+        model_ab  = TSN()
+        encoder_l = nn.Linear(512, args.feat_dim) # [2048, 128]
+        encoder_ab = nn.Linear(512, args.feat_dim)
+    elif args.model == 'i3d':
+        model_l = I3D()
+        model_ab = I3D()
+        encoder_l = nn.Linear(2048, args.feat_dim) # [2048, 128]
+        encoder_ab = nn.Linear(2048, args.feat_dim)
+    else:
+        raise Exception("model not implemented.")
 
     contrast = NCEAverage(args.feat_dim, n_data, args.nce_k, args.nce_t, args.nce_m, args.softmax)
     criterion_l = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
@@ -237,6 +243,8 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
     acc_ab_meter = AverageMeter()
 
     end = time.time()
+    optimizer_l.zero_grad()
+    optimizer_ab.zero_grad()
     for idx, (inputs, index) in enumerate(train_loader):
         data_time.update(time.time() - end)
         # l, ab = inputs['rgb'], inputs['rgb']
@@ -247,6 +255,10 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
         bsz = l.size(0)
         l = l.float()
         ab = ab.float()
+
+        # print (torch.max(ab[0]), 'max')
+        # print (torch.min(ab[0]), 'min')
+        # print (torch.mean(ab[0]), 'mean')
         if torch.cuda.is_available():
             index = index.cuda()
             l = l.cuda()
@@ -265,17 +277,21 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
         feat_ab, cls_ab = model_ab(ab) # [bs, 8, 2048]
         # print (feat_l.size()) # [bs*8, 2048]
         # print (cls_l.size()) # [bs*8]
-        # ===================consensus feature=====================
-        consensus = ConsensusModule('avg')
-        # ===================forward encoder=====================
-        enc_l = encoder_l(feat_l)
-        enc_ab = encoder_ab(feat_ab)
-        enc_l = enc_l.view((-1, args.num_segments) + enc_l.size()[1:])
-        enc_ab = enc_ab.view((-1, args.num_segments) + enc_ab.size()[1:])
-        # print (enc_l.size())
-        enc_l = consensus(enc_l).squeeze()
-        enc_ab = consensus(enc_ab).squeeze()
-        # print (enc_l.size())
+        if args.model == 'tsm':
+            # ===================consensus feature=====================
+            consensus = ConsensusModule('avg')
+            # ===================forward encoder=====================
+            enc_l = encoder_l(feat_l)
+            enc_ab = encoder_ab(feat_ab)
+            enc_l = enc_l.view((-1, args.num_segments) + enc_l.size()[1:])
+            enc_ab = enc_ab.view((-1, args.num_segments) + enc_ab.size()[1:])
+            # print (enc_l.size())
+            enc_l = consensus(enc_l).squeeze()
+            enc_ab = consensus(enc_ab).squeeze()
+            # print (enc_l.size())
+        elif args.model == 'i3d':
+            enc_l =  encoder_l(feat_l)
+            enc_ab = encoder_ab(feat_ab)
         out_l, out_ab = contrast(enc_l, enc_ab, index)
         l_loss = criterion_l(out_l)
         ab_loss = criterion_ab(out_ab)
@@ -285,10 +301,8 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
         loss = l_loss + ab_loss
 
         # check if loss is nan or inf
-        if torch.isfinite(loss):
-            optimizer_l.zero_grad()
-            optimizer_ab.zero_grad()
-            loss.backward()
+        loss.backward()
+        if idx % 8 == 0:
             # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e2, norm_type=1)
             # print (model.encoder.module.l_to_ab.classifier.weight.grad)
             # print (model.encoder.module.l_to_ab.classifier.bias.grad)
@@ -297,9 +311,9 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
             # print (model.encoder.module.l_to_ab.base_model.layer3[0].conv1.weight.grad) # learning_rate?
             optimizer_l.step()
             optimizer_ab.step()
-        else:
-            print ("Loss is not finite.")
-            continue
+            optimizer_l.zero_grad()
+            optimizer_ab.zero_grad()
+
         # ===================meters=====================
         losses.update(loss.item(), bsz)
         l_loss_meter.update(l_loss.item(), bsz)
@@ -338,9 +352,14 @@ def main():
     args = parse_option()
 
     # set the loader
-    train_loader, n_data = get_train_loader(split='train', args=args)
-    eval_loader, _ = get_train_loader(split='dev', args=args)
-    test_loader, _ = get_train_loader(split='test', args=args)
+    # train_loader, n_data = get_train_loader(split='train', args=args)
+    # eval_loader, _ = get_train_loader(split='dev', args=args)
+    # test_loader, _ = get_train_loader(split='test', args=args)
+
+    # set the loader
+    train_loader, n_data = get_dataloaders(args=args, stage='train')
+    eval_loader, _ = get_dataloaders(args=args, stage='dev')
+    test_loader, _ = get_dataloaders(args=args, stage='test')
 
     # set the model
     model_l, model_ab, encoder_l, encoder_ab, contrast, criterion_ab, criterion_l = set_model(args, n_data)
@@ -385,8 +404,8 @@ def main():
     # routine
     for epoch in range(args.start_epoch, args.epochs + 1):
 
-        adjust_learning_rate(epoch, args, optimizer_l)
-        adjust_learning_rate(epoch, args, optimizer_ab)
+        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_l)
+        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_ab)
         print("==> training...")
 
         time1 = time.time()
