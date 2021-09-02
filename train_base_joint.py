@@ -62,7 +62,7 @@ def parse_option():
     parser.add_argument('--layer', type=int, default=6, help='which layer to evaluate')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='train25', choices=['train100', 'train25', 'train50'])
+    parser.add_argument('--dataset', type=str, default='train25', choices=['train100', 'train5', 'train25', 'train50'])
 
     # video
     parser.add_argument('--num_segments', type=int, default=8, help='')
@@ -102,7 +102,7 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
 
     # opt.model_name = opt.model_path.split('/')[-2]
-    opt.model_name = 'base_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model, opt.batch_size_glb, opt.learning_rate,
+    opt.model_name = 'base_{}_data_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model, opt.dataset, opt.batch_size_glb, opt.learning_rate,
                                                                   opt.weight_decay)
 
     opt.model_name = '{}_view_{}'.format(opt.model_name, opt.view)
@@ -509,9 +509,10 @@ def main():
     # val_loader, _ = get_train_loader('dev', args)
         # set the loader
     train100_loader, n_data = get_dataloaders(args=args, stage='train')
+    train5_loader, n_data = get_dataloaders(args=args, stage='train5')
     train25_loader, n_data = get_dataloaders(args=args, stage='train25')
     train50_loader, n_data = get_dataloaders(args=args, stage='train50')
-    train_loader = {'train100': train100_loader, 'train25': train25_loader, 'train50': train50_loader}[args.dataset]
+    train_loader = {'train100': train100_loader, 'train5': train5_loader, 'train25': train25_loader, 'train50': train50_loader}[args.dataset]
     eval_loader, _ = get_dataloaders(args=args, stage='dev')
     test_loader, _ = get_dataloaders(args=args, stage='test')
     # set the model

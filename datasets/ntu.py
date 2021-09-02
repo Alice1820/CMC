@@ -309,6 +309,8 @@ class NTU(Dataset):
         if split == 'cross_subject':
             if stage == 'train':
                 subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
+            elif stage == 'train5':
+                subjects = [1]
             elif stage == 'train25':
                 subjects = [1, 4, 8, 13]
             elif stage == 'train50':
@@ -548,6 +550,8 @@ class NTUV2(Dataset):
         if split == 'cross_subject':
             if stage == 'train':
                 subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
+            elif stage == 'train5':
+                subjects = [1]
             elif stage == 'train25':
                 subjects = [1, 4, 8, 13]
             elif stage == 'train50':
