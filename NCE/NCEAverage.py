@@ -114,7 +114,7 @@ class NCEAverageXYZ(nn.Module):
         self.register_buffer('memory_y', torch.rand(outputSize, inputSize).mul_(2 * stdv).add_(-stdv))
         self.register_buffer('memory_z', torch.rand(outputSize, inputSize).mul_(2 * stdv).add_(-stdv))
 
-    def forward(self, x, y, z, idx=None):
+    def forward(self, x, y, z, index):
         K = int(self.params[0].item())
         T = self.params[1].item()
         Z_x = self.params[2].item()
@@ -130,9 +130,8 @@ class NCEAverageXYZ(nn.Module):
         # y: [bs, 128]
         # z: [bs, 128]
         # score computation
-        if idx is None:
-            idx = self.multinomial.draw(batchSize * (self.K + 1)).view(batchSize, -1)
-            idx.select(1, 0).copy_(y.data)
+        idx = self.multinomial.draw(batchSize * (self.K + 1)).view(batchSize, -1)
+        idx.select(1, 0).copy_(index.data)
         # sample
         weight_x = torch.index_select(self.memory_x, 0, idx.view(-1)).detach()
         weight_x = weight_x.view(batchSize, K + 1, inputSize)
@@ -160,21 +159,28 @@ class NCEAverageXYZ(nn.Module):
 
         # # update memory
         with torch.no_grad():
-            l_pos = torch.index_select(self.memory_l, 0, y.view(-1))
-            l_pos.mul_(momentum)
-            l_pos.add_(torch.mul(l, 1 - momentum))
-            l_norm = l_pos.pow(2).sum(1, keepdim=True).pow(0.5)
-            updated_l = l_pos.div(l_norm)
-            self.memory_l.index_copy_(0, y, updated_l)
+            x_pos = torch.index_select(self.memory_x, 0, index.view(-1))
+            x_pos.mul_(momentum)
+            x_pos.add_(torch.mul(l, 1 - momentum))
+            x_norm = x_pos.pow(2).sum(1, keepdim=True).pow(0.5)
+            updated_x = x_pos.div(x_norm)
+            self.memory_x.index_copy_(0, index, updated_x)
 
-            ab_pos = torch.index_select(self.memory_ab, 0, y.view(-1))
-            ab_pos.mul_(momentum)
-            ab_pos.add_(torch.mul(ab, 1 - momentum))
-            ab_norm = ab_pos.pow(2).sum(1, keepdim=True).pow(0.5)
-            updated_ab = ab_pos.div(ab_norm)
-            self.memory_ab.index_copy_(0, y, updated_ab)
+            y_pos = torch.index_select(self.memory_y, 0, index.view(-1))
+            y_pos.mul_(momentum)
+            y_pos.add_(torch.mul(y, 1 - momentum))
+            y_norm = y_pos.pow(2).sum(1, keepdim=True).pow(0.5)
+            updated_y = y_pos.div(y_norm)
+            self.memory_y.index_copy_(0, index, updated_y)
 
-        return out_l, out_ab
+            z_pos = torch.index_select(self.memory_z, 0, index.view(-1))
+            z_pos.mul_(momentum)
+            z_pos.add_(torch.mul(z, 1 - momentum))
+            z_norm = z_pos.pow(2).sum(1, keepdim=True).pow(0.5)
+            updated_z = z_pos.div(z_norm)
+            self.memory_z.index_copy_(0, index, updated_z)
+
+        return out_x, out_y, out_z
 
 # =========================
 # InsDis and MoCo

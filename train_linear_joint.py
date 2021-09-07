@@ -38,11 +38,11 @@ def parse_option():
     parser.add_argument('--batch_size', type=int, default=8, help='batch_size')
     parser.add_argument('--batch_size_glb', type=int, default=64, help='batch_size')
     parser.add_argument('--num_workers', type=int, default=8, help='num of workers to use')
-    parser.add_argument('--epochs', type=int, default=60, help='number of training epochs')
+    parser.add_argument('--epochs', type=int, default=120, help='number of training epochs')
 
     # optimization
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='30,40,50', help='where to decay lr, can be a list')
+    parser.add_argument('--lr_decay_epochs', type=str, default='30, 60, 90', help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.2, help='decay rate for learning rate')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
     parser.add_argument('--weight_decay', type=float, default=0, help='weight decay')
@@ -59,6 +59,7 @@ def parse_option():
                                                                          'resnet50v3', 'resnet101v3', 'resnet18v3',
                                                                          'tsm', 'i3d'])
     parser.add_argument('--model_path', type=str, default=None, help='the model to test')
+    parser.add_argument('--test', type=str, default=None, help='the model to test')
     parser.add_argument('--layer', type=int, default=6, help='which layer to evaluate')
 
     # dataset
@@ -69,7 +70,7 @@ def parse_option():
     parser.add_argument('--num_class', type=int, default=60, help='')
 
     # add new views
-    parser.add_argument('--view', type=str, default='RGBD', choices=['Lab', 'YCbCr', 'RGBD'])
+    parser.add_argument('--view', type=str, default='Lab', choices=['Lab', 'YCbCr'])
 
     # path definition
     parser.add_argument('--data_folder', type=str, default='/data0/xifan/NTU_RGBD_60', help='path to data')
@@ -81,6 +82,7 @@ def parse_option():
 
     # log file
     parser.add_argument('--log', type=str, default='time_linear.txt', help='log file')
+    parser.add_argument('--task', type=str, default=None)
 
     # GPU setting
     parser.add_argument('--gpu', default=None, type=int, help='GPU id to use.')
@@ -101,18 +103,18 @@ def parse_option():
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
+    if opt.task is None:
+        raise Exception('Task name is None.')
     # opt.model_name = opt.model_path.split('/')[-2]
-    opt.model_name = 'linear_{}_bsz_{}_lr_{}_decay_{}'.format(opt.model, opt.batch_size_glb, opt.learning_rate,
+    opt.model_name = '{}_data_{}_bsz_{}_lr_{}_decay_{}'.format(opt.task, opt.dataset, opt.batch_size_glb, opt.learning_rate,
                                                                   opt.weight_decay)
 
-    opt.model_name = '{}_view_{}'.format(opt.model_name, opt.view)
-
     opt.tb_folder = os.path.join(opt.tb_path, opt.model_name + '_layer{}'.format(opt.layer))
-    if not os.path.isdir(opt.tb_folder):
+    if not os.path.isdir(opt.tb_folder) and not opt.test:
         os.makedirs(opt.tb_folder)
 
     opt.save_folder = os.path.join(opt.save_path, opt.model_name)
-    if not os.path.isdir(opt.save_folder):
+    if not os.path.isdir(opt.save_folder) and not opt.test:
         os.makedirs(opt.save_folder)
 
     if opt.dataset == 'imagenet100':
@@ -211,17 +213,6 @@ def set_model(args):
     # ===================model y=====================
     model_y = model_y.cuda()
     model_y = nn.DataParallel(model_y)
-    if args.model_path:
-        # load pre-trained model
-        print('==> loading pre-trained model')
-        ckpt = torch.load(args.model_path)
-        model_x.load_state_dict(ckpt['model_l']) # rgb
-        model_y.load_state_dict(ckpt['model_ab']) # depth
-        print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
-        print('==> done')
-        # model_x.eval()
-        # model_y.eval()
-
     # ===================classifier=====================
     classifier_x = classifier_x.cuda()
     classifier_x = nn.DataParallel(classifier_x)
@@ -234,6 +225,17 @@ def set_model(args):
     classifier = classifier.cuda()
     classifier = nn.DataParallel(classifier)
     classifier.train()
+
+    if args.model_path:
+        # load pre-trained model
+        print('==> loading pre-trained model')
+        ckpt = torch.load(args.model_path)
+        model_x.load_state_dict(ckpt['model_l']) # rgb
+        model_y.load_state_dict(ckpt['model_ab']) # depth
+        print("==> loaded cmc checkpoint'{}' (epoch {})".format(args.model_path, ckpt['epoch']))
+        print('==> done')
+    else:
+        raise Exception("cmc model path is None.")
 
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
@@ -421,9 +423,7 @@ def validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifie
             target = target.cuda(opt.gpu, non_blocking=True)
             # ===================forward=====================
             feat_x, _ = model_x(input_x) # [bs, 8, 512]
-            feat_x = feat_x.detach()
             feat_y, _ = model_y(input_y) # [bs, 8, 512]
-            feat_y = feat_y.detach()
             feat = torch.cat((feat_x, feat_y), dim=1) # [bs, 8, 1024]
             # feat = torch.cat((feat_l.detach(), feat_ab.detach()), dim=1)
 
@@ -489,15 +489,20 @@ def validate(val_loader, model_x, model_y, classifier_x, classifier_y, classifie
                        top1=top1_y, top5=top5_y))
                 print ('')
 
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
-              .format(top1=top1, top5=top5))
+        print(' *[Joint] Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
+        print(' *[ViewX] Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1_x, top5=top5_x))
+        print(' *[ViewY] Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1_y, top5=top5_y))
 
     return top1.avg, top5.avg, losses.avg, top1_x.avg, top5_x.avg, losses_x.avg, top1_y.avg, top5_y.avg, losses_y.avg
 
 
 def main():
     global best_acc1
+    global best_acc1_x
+    global best_acc1_y
     best_acc1 = 0
+    best_acc1_x = 0
+    best_acc1_y = 0
 
     args = parse_option()
 
@@ -560,90 +565,138 @@ def main():
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
-    # tensorboard
-    logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
+    if not args.test:
+        # tensorboard
+        logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
 
-    # routine
-    for epoch in range(args.start_epoch, args.epochs + 1):
+        # routine
+        for epoch in range(args.start_epoch, args.epochs + 1):
 
-        adjust_learning_rate(epoch, args, optimizer)
-        print("==> training...")
+            adjust_learning_rate(epoch, args, optimizer)
+            adjust_learning_rate(epoch, args, optimizer_x)
+            adjust_learning_rate(epoch, args, optimizer_y)
+            print("==> training...")
 
-        time1 = time.time()
-        top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
-                                                    train(epoch, train_loader, model_x, model_y, \
-                                                    classifier_x, classifier_y, classifier, criterion, optimizer_x, optimizer_y, optimizer, args)
-        time2 = time.time()
-        print('train epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
+            time1 = time.time()
+            top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
+                                                        train(epoch, train_loader, model_x, model_y, \
+                                                        classifier_x, classifier_y, classifier, criterion, optimizer_x, optimizer_y, optimizer, args)
+            time2 = time.time()
+            print('train epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
-        logger.log_value('joint/train_acc', top1, epoch)
-        logger.log_value('joint/train_acc5', top5, epoch)
-        logger.log_value('joint/train_loss', losses, epoch)
-        logger.log_value('x/train_acc', top1_x, epoch)
-        logger.log_value('x/train_acc5', top5_x, epoch)
-        logger.log_value('x/train_loss', losses_x, epoch)
-        logger.log_value('y/train_acc', top1_y, epoch)
-        logger.log_value('y/train_acc5', top5_y, epoch)
-        logger.log_value('y/train_loss', losses_y, epoch)
+            logger.log_value('joint/train_acc', top1, epoch)
+            logger.log_value('joint/train_acc5', top5, epoch)
+            logger.log_value('joint/train_loss', losses, epoch)
+            logger.log_value('x/train_acc', top1_x, epoch)
+            logger.log_value('x/train_acc5', top5_x, epoch)
+            logger.log_value('x/train_loss', losses_x, epoch)
+            logger.log_value('y/train_acc', top1_y, epoch)
+            logger.log_value('y/train_acc5', top5_y, epoch)
+            logger.log_value('y/train_loss', losses_y, epoch)
 
+            print("==> evaluating...")
+            top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
+                                                        validate(eval_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, args)
+
+            logger.log_value('joint/eval_acc', top1, epoch)
+            logger.log_value('joint/eval_acc5', top5, epoch)
+            logger.log_value('joint/eval_loss', losses, epoch)
+            logger.log_value('x/eval_acc', top1_x, epoch)
+            logger.log_value('x/eval_acc5', top5_x, epoch)
+            logger.log_value('x/eval_loss', losses_x, epoch)
+            logger.log_value('y/eval_acc', top1_y, epoch)
+            logger.log_value('y/eval_acc5', top5_y, epoch)
+            logger.log_value('y/eval_loss', losses_y, epoch)
+
+            # save the best model
+            if top1 > best_acc1:
+                best_acc1 = top1
+                state = {
+                    'opt': args,
+                    'epoch': epoch,
+                    'model_x': model_x.state_dict(),
+                    'model_y': model_y.state_dict(),
+                    'classifier': classifier.state_dict(),
+                    'classifier_x': classifier_x.state_dict(),
+                    'classifier_y': classifier_y.state_dict(),
+                    'best_acc1': best_acc1,
+                    'optimizer': optimizer.state_dict(),
+                    'optimizer_x': optimizer_x.state_dict(),
+                    'optimizer_y': optimizer_y.state_dict(),
+                }
+                save_name = '{}_best_joint.pth'.format(args.model)
+                save_name = os.path.join(args.save_folder, save_name)
+                print('saving best joint model!')
+                torch.save(state, save_name)
+
+            # save the best model
+            if top1_x > best_acc1_x:
+                best_acc1_x = top1_x
+                state = {
+                    'opt': args,
+                    'epoch': epoch,
+                    'model_x': model_x.state_dict(),
+                    'model_y': model_y.state_dict(),
+                    'classifier': classifier.state_dict(),
+                    'classifier_x': classifier_x.state_dict(),
+                    'classifier_y': classifier_y.state_dict(),
+                    'best_acc1': best_acc1_x,
+                    'optimizer': optimizer.state_dict(),
+                    'optimizer_x': optimizer_x.state_dict(),
+                    'optimizer_y': optimizer_y.state_dict(),
+                }
+                save_name = '{}_best_rgb.pth'.format(args.model)
+                save_name = os.path.join(args.save_folder, save_name)
+                print('saving best rgb model!')
+                torch.save(state, save_name)
+            
+            # save the best model
+            if top1_y > best_acc1_y:
+                best_acc1_y = top1_y
+                state = {
+                    'opt': args,
+                    'epoch': epoch,
+                    'model_x': model_x.state_dict(),
+                    'model_y': model_y.state_dict(),
+                    'classifier': classifier.state_dict(),
+                    'classifier_x': classifier_x.state_dict(),
+                    'classifier_y': classifier_y.state_dict(),
+                    'best_acc1': best_acc1_y,
+                    'optimizer': optimizer.state_dict(),
+                    'optimizer_x': optimizer_x.state_dict(),
+                    'optimizer_y': optimizer_y.state_dict(),
+                }
+                save_name = '{}_best_dep.pth'.format(args.model)
+                save_name = os.path.join(args.save_folder, save_name)
+                print('saving best dep model!')
+                torch.save(state, save_name)
+
+            # save model
+            if epoch % args.save_freq == 0:
+                print('==> Saving...')
+                state = {
+                    'opt': args,
+                    'epoch': epoch,
+                    'model_x': model_x.state_dict(),
+                    'model_y': model_y.state_dict(),
+                    'classifier': classifier.state_dict(),
+                    'classifier_x': classifier_x.state_dict(),
+                    'classifier_y': classifier_y.state_dict(),
+                    'best_acc1': best_acc1,
+                    'optimizer': optimizer.state_dict(),
+                    'optimizer_x': optimizer_x.state_dict(),
+                    'optimizer_y': optimizer_y.state_dict(),
+                }
+                save_name = 'rgbd_ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
+                save_name = os.path.join(args.save_folder, save_name)
+                print('saving regular model!')
+                torch.save(state, save_name)
+
+            # tensorboard logger
+            pass
+    else:
         print("==> testing...")
-        top1, top5, losses, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
-                                                    validate(eval_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, args)
-
-        logger.log_value('joint/test_acc', top1, epoch)
-        logger.log_value('joint/test_acc5', top5, epoch)
-        logger.log_value('joint/test_loss', losses, epoch)
-        logger.log_value('x/test_acc', top1_x, epoch)
-        logger.log_value('x/test_acc5', top5_x, epoch)
-        logger.log_value('x/test_loss', losses_x, epoch)
-        logger.log_value('y/test_acc', top1_y, epoch)
-        logger.log_value('y/test_acc5', top5_y, epoch)
-        logger.log_value('y/test_loss', losses_y, epoch)
-
-        # save the best model
-        if top1 > best_acc1:
-            best_acc1 = top1
-            state = {
-                'opt': args,
-                'epoch': epoch,
-                'model_x': model_x.state_dict(),
-                'model_y': model_y.state_dict(),
-                'classifier': classifier.state_dict(),
-                'classifier_x': classifier_x.state_dict(),
-                'classifier_y': classifier_y.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer': optimizer.state_dict(),
-                'optimizer_x': optimizer_x.state_dict(),
-                'optimizer_y': optimizer_y.state_dict(),
-            }
-            save_name = '{}_layer{}.pth'.format(args.model, args.layer)
-            save_name = os.path.join(args.save_folder, save_name)
-            print('saving best model!')
-            torch.save(state, save_name)
-
-        # save model
-        if epoch % args.save_freq == 0:
-            print('==> Saving...')
-            state = {
-                'opt': args,
-                'epoch': epoch,
-                'model_x': model_x.state_dict(),
-                'model_y': model_y.state_dict(),
-                'classifier': classifier.state_dict(),
-                'classifier_x': classifier_x.state_dict(),
-                'classifier_y': classifier_y.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer': optimizer.state_dict(),
-                'optimizer_x': optimizer_x.state_dict(),
-                'optimizer_y': optimizer_y.state_dict(),
-            }
-            save_name = 'rgbd_linear_ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
-            save_name = os.path.join(args.save_folder, save_name)
-            print('saving regular model!')
-            torch.save(state, save_name)
-
-        # tensorboard logger
-        pass
+        validate(test_loader, model_x, model_y, classifier_x, classifier_y, classifier, criterion, args)
 
 
 if __name__ == '__main__':

@@ -131,7 +131,6 @@ class ToTensor(object):
                 'subject_id': torch.from_numpy(np.asarray(subject_id)),
                 'label': torch.from_numpy(np.asarray(label))}
 
-
 # %%
 class NormalizeLen(object):
     """ Return a normalized number of frames. """
@@ -270,6 +269,26 @@ def get_dataloaders(args=None, stage='train'):
         transformer = transforms.Compose([NormalizeLen((args.num_segments, args.num_segments)), ToTensor()])
     
     dataset = NTUV2(args.data_folder, transform=transformer, stage=stage, args=args)
+
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                 drop_last=False, pin_memory=True)
+    n_data = len(dataset)
+    print('number of samples: {}'.format(n_data))
+
+    return dataloader, n_data
+
+def get_dataloaders_v3(args=None, stage='train'):
+    import torchvision.transforms as transforms
+    from datasets import ntu as d
+    from torch.utils.data import DataLoader
+
+    if stage == 'train':
+        # Handle data
+        transformer = transforms.Compose([AugCropV3(), NormalizeLenV3((args.num_segments, args.num_segments)), ToTensorV3()])
+    else:
+        transformer = transforms.Compose([NormalizeLenV3((args.num_segments, args.num_segments)), ToTensorV3()])
+    
+    dataset = NTUV3(args.data_folder, transform=transformer, stage=stage, args=args)
 
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                  drop_last=False, pin_memory=True)
@@ -552,8 +571,20 @@ class NTUV2(Dataset):
                 subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
             elif stage == 'train5':
                 subjects = [1]
+            elif stage == 'train5b':
+                subjects = [4]
+            elif stage == 'train5c':
+                subjects = [8]
             elif stage == 'train25':
                 subjects = [1, 4, 8, 13]
+            elif stage == 'train25b':
+                subjects = [15, 16, 17, 18]
+            elif stage == 'train25c':
+                subjects = [19, 25, 27, 28]
+            elif stage == 'train25d':
+                subjects = [31, 34, 35, 38]
+            elif stage == 'train50':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18]
             elif stage == 'train50':
                 subjects = [1, 4, 8, 13, 15, 16, 17, 18]
             elif stage == 'trainexp':
@@ -695,6 +726,396 @@ class NTUV2(Dataset):
         np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
 
         return np_clip
+
+
+class NTUV3(Dataset):
+    # RGBDI
+    def __init__(self, root_dir='',  # /data0/xifan/NTU_RGBD_60
+                 split='cross_subject', # 40 subjects, 3 cameras
+                 stage='train',
+                 transform=None,
+                 vid_len=(8, 8),
+                 vid_dim=256,
+                 vid_fr=30,
+                 args=None):
+        """
+        Args:
+            root_dir (string): Directory where data is.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        basename_rgb = os.path.join(root_dir, 'nturgbd_rgb/avi_310x256_30') 
+        basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/dep_310*256')
+        basename_ir = os.path.join(root_dir, 'nturgbd_ir/ir_310*256')
+    
+        self.vid_len = vid_len
+
+        self.rgb_list = []
+        self.dep_list = []
+        self.ir_list = []
+        self.ske_list = []
+        self.labels = []
+        self.subject_ids = []
+        self.camera_ids = []
+
+        if split == 'cross_subject':
+            if stage == 'train':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
+            elif stage == 'train5':
+                subjects = [1]
+            elif stage == 'train5b':
+                subjects = [4]
+            elif stage == 'train5c':
+                subjects = [8]
+            elif stage == 'train25':
+                subjects = [1, 4, 8, 13]
+            elif stage == 'train25b':
+                subjects = [15, 16, 17, 18]
+            elif stage == 'train25c':
+                subjects = [19, 25, 27, 28]
+            elif stage == 'train25d':
+                subjects = [31, 34, 35, 38]
+            elif stage == 'train50':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18]
+            elif stage == 'train50':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18]
+            elif stage == 'trainexp':
+                subjects = [1, 4, 8, 13, 15, 17, 19]
+            elif stage == 'test':
+                subjects = [3, 6, 7, 10, 11, 12, 20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 36, 37, 39, 40]
+            elif stage == 'dev':  # smaller train datase for exploration
+                subjects = [2, 5, 9, 14]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if
+                          f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[9:12]) in subjects]
+            self.ir_list += [os.path.join(basename_ir, f) for f in sorted(os.listdir(basename_ir)) if 
+                          f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.subject_ids += [int(f[9:12]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.camera_ids += [int(f[5:8]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+        elif split == 'cross_view':
+            if stage == 'train':
+                cameras = [2, 3]
+            elif stage == 'trainss':  # self-supervised training
+                cameras = [2, 3]
+                # cameras = [3]
+            elif stage == 'trains':
+                cameras = [2]
+            elif stage == 'test':
+                cameras = [1]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if 
+                            f.split(".")[-1] == "avi" and int(f[5:8]) in cameras]
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[5:8]) in cameras]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename)) if int(f[5:8]) in cameras]
+        else:
+            raise Exception('wrong mode: ' + args.mode)
+        # basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/310x256_{1}')
+        # basename_ske = os.path.join(root_dir, 'nturgbd_skeletons')
+
+        # self.original_w, self.original_h = 1920, 1080
+
+        # if args.no_bad_skel:
+        #     with open("bad_skel.txt", "r") as f:
+        #         for line in f.readlines():
+        #             if os.path.join(basename_ske, line[:-1] + ".skeleton") in self.ske_list:
+        #                 i = self.ske_list.index(os.path.join(basename_ske, line[:-1] + ".skeleton"))
+        #                 self.ske_list.pop(i)
+        #                 self.rgb_list.pop(i)
+        #                 self.labels.pop(i)
+
+        self.rgb_list, self.dep_list, self.ir_list, self.labels, self.subject_ids, self.camera_ids = \
+                            shuffle(self.rgb_list, self.dep_list, self.ir_list, self.labels, self.subject_ids, self.camera_ids)
+
+        self.transform = transform
+        self.root_dir = root_dir
+        self.stage = stage
+        self.args = args
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+
+        rgbpath = self.rgb_list[idx]
+        deppath = self.dep_list[idx]
+        irpath = self.ir_list[idx]
+
+        label = self.labels[idx]
+        subject_id = self.subject_ids[idx]
+        camera_id = self.camera_ids[idx]
+
+        video = np.zeros([1])
+        maps = np.zeros([1])
+        # skeleton = np.zeros([1])
+
+        # if self.args.modality == "rgb" or self.args.modality == "both":
+        video = load_video(rgbpath)
+        depth = load_depth(deppath)
+        ir = load_video(irpath)
+        # if self.args.modality == "skeleton" or self.args.modality == "both":
+        #     skeleton = get_3D_skeleton(skepath)
+
+        # video, maps = self.video_transform(self.args, video, maps)
+        video = self.video_transform(video) # (32, 256, 310, 3)
+        depth = self.depth_transform(depth)
+        ir = self.video_transform(ir) # (32, 256, 310, 3)
+        # print (video.shape)
+        # print (depth.shape)
+        sample = {'rgb': video, 'dep': depth, 'ir': ir, 'label': label - 1, 'subject_id': subject_id - 1}
+        
+        # print (torch.max(depth), 'torch max')
+        # print (torch.min(depth), 'torch min')
+        # print (torch.mean(depth), 'torch mean')
+        if self.transform:
+            sample = self.transform(sample)
+
+        # print (torch.max(depth), 'torch max')
+        # print (torch.min(depth), 'torch min')
+        # print (torch.mean(depth), 'torch mean')
+        return sample, idx
+
+    def video_transform(self, np_clip):
+        # if args.modality == "rgb" or args.modality == "both":
+        # Div by 255
+        np_clip /= 255.
+
+        # Normalization
+        np_clip -= np.asarray([0.485, 0.456, 0.406]).reshape(1, 1, 3)  # mean
+        np_clip /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
+
+        return np_clip
+
+    def depth_transform(self, np_clip):
+        ####### depth ######
+        # histogram, fit the first frame of each video to a gauss distribution
+        # frame = np_clip[0, :, :]
+        # data = np.reshape(frame, [frame.size])
+        # data = data[(data >= 500) * (data <= 4500)] # range for skeleton detection
+        # mu, std = norm.fit(data)
+        # print (mu, std)
+        # # select certain range
+        # r_min = mu - std
+        # r_max = mu + std
+        # np_clip[(np_clip < r_min)] = 0.0
+        # np_clip[(np_clip > r_max)] = 0.0
+        # np_clip = np_clip - mu
+        # np_clip = np_clip / std # -3~3
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
+        p_min = 500.
+        p_max = 4500.
+        np_clip[(np_clip < p_min)] = 0.0
+        np_clip[(np_clip > p_max)] = 0.0
+        np_clip -= 2500.
+        np_clip /= 2000.
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
+        # repeat to BGR to fit pretrained resnet parameters
+        np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
+
+        return np_clip
+
+
+class NTU120(Dataset):
+
+    def __init__(self, root_dir='/data0/xifan',  # /data0/xifan/
+                 split='cross_subject', # 40 subject, 3 camera
+                 stage='train',
+                 transform=None,
+                 vid_len=(8, 8),
+                 vid_dim=256,
+                 vid_fr=30,
+                 args=None):
+        """
+        Args:
+            root_dir (string): Directory where data is.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        basename60_rgb = os.path.join(root_dir, 'NTU_RGBD_60', 'nturgbd_rgb/avi_310x256_30') 
+        basename60_dep = os.path.join(root_dir, 'NTU_RGBD_60', 'nturgbd_depth_masked/dep_310*256')
+        basename120_rgb = os.path.join(root_dir, 'NTU_RGBD_120', 'nturgbd_rgb/avi_310x256_30') 
+        basename120_dep = os.path.join(root_dir, 'NTU_RGBD_120', 'nturgbd_depth_masked/dep_310*256')
+
+        self.vid_len = vid_len
+
+        self.rgb_list = []
+        self.dep_list = []
+        self.ske_list = []
+        self.labels = []
+        self.subject_ids = []
+        self.camera_ids = []
+
+        if split == 'cross_subject':
+            if stage == 'train':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
+            elif stage == 'train5':
+                subjects = [1]
+            elif stage == 'train5b':
+                subjects = [4]
+            elif stage == 'train5c':
+                subjects = [8]
+            elif stage == 'train25':
+                subjects = [1, 4, 8, 13]
+            elif stage == 'train25b':
+                subjects = [15, 16, 17, 18]
+            elif stage == 'train25c':
+                subjects = [19, 25, 27, 28]
+            elif stage == 'train25d':
+                subjects = [31, 34, 35, 38]
+            elif stage == 'train50':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18]
+            elif stage == 'train50':
+                subjects = [1, 4, 8, 13, 15, 16, 17, 18]
+            elif stage == 'trainexp':
+                subjects = [1, 4, 8, 13, 15, 17, 19]
+            elif stage == 'test':
+                subjects = [3, 6, 7, 10, 11, 12, 20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 36, 37, 39, 40]
+            elif stage == 'dev':  # smaller train datase for exploration
+                subjects = [2, 5, 9, 14]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if
+                          f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[9:12]) in subjects]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.subject_ids += [int(f[9:12]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+            self.camera_ids += [int(f[5:8]) for f in sorted(os.listdir(basename_rgb)) if
+                        f.split(".")[-1] == "avi" and int(f[9:12]) in subjects]
+        elif split == 'cross_view':
+            if stage == 'train':
+                cameras = [2, 3]
+            elif stage == 'trainss':  # self-supervised training
+                cameras = [2, 3]
+                # cameras = [3]
+            elif stage == 'trains':
+                cameras = [2]
+            elif stage == 'test':
+                cameras = [1]
+            else:
+                raise Exception('wrong stage: ' + stage)
+            self.rgb_list += [os.path.join(basename_rgb, f) for f in sorted(os.listdir(basename_rgb)) if 
+                            f.split(".")[-1] == "avi" and int(f[5:8]) in cameras]
+            self.dep_list += [os.path.join(basename_dep, f) for f in sorted(os.listdir(basename_dep)) if int(f[5:8]) in cameras]
+            self.labels += [int(f[17:20]) for f in sorted(os.listdir(basename)) if int(f[5:8]) in cameras]
+        else:
+            raise Exception('wrong mode: ' + args.mode)
+        # basename_dep = os.path.join(root_dir, 'nturgbd_depth_masked/310x256_{1}')
+        # basename_ske = os.path.join(root_dir, 'nturgbd_skeletons')
+
+        # self.original_w, self.original_h = 1920, 1080
+
+        # if args.no_bad_skel:
+        #     with open("bad_skel.txt", "r") as f:
+        #         for line in f.readlines():
+        #             if os.path.join(basename_ske, line[:-1] + ".skeleton") in self.ske_list:
+        #                 i = self.ske_list.index(os.path.join(basename_ske, line[:-1] + ".skeleton"))
+        #                 self.ske_list.pop(i)
+        #                 self.rgb_list.pop(i)
+        #                 self.labels.pop(i)
+
+        self.rgb_list, self.dep_list, self.labels, self.subject_ids, self.camera_ids = \
+                            shuffle(self.rgb_list, self.dep_list, self.labels, self.subject_ids, self.camera_ids)
+
+        self.transform = transform
+        self.root_dir = root_dir
+        self.stage = stage
+        self.args = args
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+
+        rgbpath = self.rgb_list[idx]
+        deppath = self.dep_list[idx]
+
+        label = self.labels[idx]
+        subject_id = self.subject_ids[idx]
+        camera_id = self.camera_ids[idx]
+
+        video = np.zeros([1])
+        maps = np.zeros([1])
+        # skeleton = np.zeros([1])
+
+        # if self.args.modality == "rgb" or self.args.modality == "both":
+        video = load_video(rgbpath)
+        depth = load_depth(deppath)
+        # if self.args.modality == "skeleton" or self.args.modality == "both":
+        #     skeleton = get_3D_skeleton(skepath)
+
+        # video, maps = self.video_transform(self.args, video, maps)
+        video = self.video_transform(video) # (32, 256, 310, 3)
+        depth = self.depth_transform(depth)
+        # print (video.shape)
+        # print (depth.shape)
+        sample = {'rgb': video, 'dep': depth, 'label': label - 1, 'subject_id': subject_id - 1}
+        
+        # print (torch.max(depth), 'torch max')
+        # print (torch.min(depth), 'torch min')
+        # print (torch.mean(depth), 'torch mean')
+        if self.transform:
+            sample = self.transform(sample)
+
+        # print (torch.max(depth), 'torch max')
+        # print (torch.min(depth), 'torch min')
+        # print (torch.mean(depth), 'torch mean')
+        return sample, idx
+
+    def video_transform(self, np_clip):
+        # if args.modality == "rgb" or args.modality == "both":
+        # Div by 255
+        np_clip /= 255.
+
+        # Normalization
+        np_clip -= np.asarray([0.485, 0.456, 0.406]).reshape(1, 1, 3)  # mean
+        np_clip /= np.asarray([0.229, 0.224, 0.225]).reshape(1, 1, 3)  # std
+
+        return np_clip
+
+    def depth_transform(self, np_clip):
+        ####### depth ######
+        # histogram, fit the first frame of each video to a gauss distribution
+        # frame = np_clip[0, :, :]
+        # data = np.reshape(frame, [frame.size])
+        # data = data[(data >= 500) * (data <= 4500)] # range for skeleton detection
+        # mu, std = norm.fit(data)
+        # print (mu, std)
+        # # select certain range
+        # r_min = mu - std
+        # r_max = mu + std
+        # np_clip[(np_clip < r_min)] = 0.0
+        # np_clip[(np_clip > r_max)] = 0.0
+        # np_clip = np_clip - mu
+        # np_clip = np_clip / std # -3~3
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
+        p_min = 500.
+        p_max = 4500.
+        np_clip[(np_clip < p_min)] = 0.0
+        np_clip[(np_clip > p_max)] = 0.0
+        np_clip -= 2500.
+        np_clip /= 2000.
+        # print (np.max(np_clip), 'max')
+        # print (np.min(np_clip), 'min')
+        # print (np.mean(np_clip), 'mean')
+        # repeat to BGR to fit pretrained resnet parameters
+        np_clip = np.repeat(np_clip[:, :, :, np.newaxis], 3, axis=3) # 24, 310, 256, 3
+
+        return np_clip
+
 
 # %%
 import argparse

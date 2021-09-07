@@ -47,7 +47,7 @@ def parse_option():
 
     parser.add_argument('--print_freq', type=int, default=10, help='print frequency')
     parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
-    parser.add_argument('--save_freq', type=int, default=2, help='save frequency')
+    parser.add_argument('--save_freq', type=int, default=5, help='save frequency')
     parser.add_argument('--batch_size', type=int, default=128, help='batch_size')
     parser.add_argument('--batch_size_glb', type=int, default=128, help='batch_size')
     parser.add_argument('--num_workers', type=int, default=16, help='num of workers to use')
@@ -123,7 +123,7 @@ def parse_option():
     opt.method = 'softmax' if opt.softmax else 'nce'
     if opt.task is None:
         raise Exception('Task name is None.')
-    opt.model_name = '{}_{}_{}_{}_lr_{}_decay_{}_bsz_{}_view_RGBD'.format(opt.task, opt.method, opt.nce_k, opt.model, opt.learning_rate,
+    opt.model_name = '{}_{}_{}_{}_lr_{}_decay_{}_bsz_{}_view_RGBDI'.format(opt.task, opt.method, opt.nce_k, opt.model, opt.learning_rate,
                                                                     opt.weight_decay, opt.batch_size_glb)
 
     if opt.amp:
@@ -186,38 +186,48 @@ def get_train_loader(split='train', args=None):
 def set_model(args, n_data):
     # set the model
     if args.model == 'tsm':
-        model_l  = TSN()
-        model_ab  = TSN()
-        encoder_l = nn.Linear(512, args.feat_dim) # [2048, 128]
-        encoder_ab = nn.Linear(512, args.feat_dim)
+        model_x  = TSN()
+        model_y  = TSN()
+        model_z  = TSN()
+        encoder_x = nn.Linear(512, args.feat_dim) # [2048, 128]
+        encoder_y = nn.Linear(512, args.feat_dim)
+        encoder_z = nn.Linear(512, args.feat_dim)
     elif args.model == 'i3d':
-        model_l = I3D()
-        model_ab = I3D()
-        encoder_l = nn.Linear(2048, args.feat_dim) # [2048, 128]
-        encoder_ab = nn.Linear(2048, args.feat_dim)
+        model_x = I3D()
+        model_y = I3D()
+        model_z = I3D()
+        encoder_x = nn.Linear(2048, args.feat_dim) # [2048, 128]
+        encoder_y = nn.Linear(2048, args.feat_dim)
+        encoder_z = nn.Linear(2048, args.feat_dim)
     else:
         raise Exception("model not implemented.")
 
     contrast = NCEAverage(args.feat_dim, n_data, args.nce_k, args.nce_t, args.nce_m, args.softmax)
-    criterion_l = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
-    criterion_ab = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
+    criterion_x = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
+    criterion_y = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
+    criterion_z = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
 
     if torch.cuda.is_available():
-        model_l = model_l.cuda()
-        model_ab = model_ab.cuda()
-        encoder_l = encoder_l.cuda()
-        encoder_ab = encoder_ab.cuda()
+        model_x = model_x.cuda()
+        model_y = model_y.cuda()
+        model_z = model_z.cuda()
+        encoder_x = encoder_x.cuda()
+        encoder_y = encoder_y.cuda()
+        encoder_z = encoder_z.cuda()
         contrast = contrast.cuda()
-        criterion_ab = criterion_ab.cuda()
-        criterion_l = criterion_l.cuda()
+        criterion_x = criterion_x.cuda()
+        criterion_y = criterion_y.cuda()
+        criterion_z = criterion_z.cuda()
         cudnn.benchmark = True
-        model_l = nn.DataParallel(model_l)
-        model_ab = nn.DataParallel(model_ab)
-        encoder_l = nn.DataParallel(encoder_l)
-        encoder_ab = nn.DataParallel(encoder_ab)
+        model_x = nn.DataParallel(model_x)
+        model_y = nn.DataParallel(model_y)
+        model_z = nn.DataParallel(model_z)
+        encoder_x = nn.DataParallel(encoder_x)
+        encoder_y = nn.DataParallel(encoder_y)
+        encoder_z = nn.DataParallel(encoder_z)
         # contrast = nn.DataParallel(contrast)
 
-    return model_l, model_ab, encoder_l, encoder_ab, contrast, criterion_ab, criterion_l
+    return model_x, model_y, model_z, encoder_x, encoder_y, encoder_z, contrast, criterion_x, criterion_y, criterion_z
 
 
 def set_optimizer(args, model, encoder):
@@ -228,7 +238,13 @@ def set_optimizer(args, model, encoder):
     return optimizer
 
 
-def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contrast, criterion_l, criterion_ab, optimizer_l, optimizer_ab, args):
+def train(epoch, train_loader, 
+        model_x, model_y, model_z, 
+        encoder_x, encoder_y, encoder_z, 
+        contrast, 
+        criterion_x, criterion_y, criterion_z,
+        optimizer_x, optimizer_y, optimizer_z,
+        args):
     """
     one epoch training
     """
@@ -236,72 +252,82 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
-    l_loss_meter = AverageMeter()
-    ab_loss_meter = AverageMeter()
-    l_prob_meter = AverageMeter()
-    ab_prob_meter = AverageMeter()
-    cls_l_loss_meter = AverageMeter()
-    cls_ab_loss_meter = AverageMeter()
-    acc_l_meter = AverageMeter()
-    acc_ab_meter = AverageMeter()
+    x_loss_meter = AverageMeter()
+    y_loss_meter = AverageMeter()
+    z_loss_meter = AverageMeter()
+    x_prob_meter = AverageMeter()
+    y_prob_meter = AverageMeter()
+    z_prob_meter = AverageMeter()
 
     end = time.time()
-    optimizer_l.zero_grad()
-    optimizer_ab.zero_grad()
+    optimizer_x.zero_grad()
+    optimizer_y.zero_grad()
+    optimizer_z.zero_grad()
     for idx, (inputs, index) in enumerate(train_loader):
         data_time.update(time.time() - end)
-        # l, ab = inputs['rgb'], inputs['rgb']
-        l, ab = inputs['rgb'], inputs['dep']
-        # print (l.size())
-        # print (ab.size())
+        # x, y = inputs['rgb'], inputs['rgb']
+        x, y, z = inputs['rgb'], inputs['dep'], inputs['ir']
+        # print (x.size())
+        # print (y.size())
         label = inputs['label']
-        bsz = l.size(0)
-        l = l.float()
-        ab = ab.float()
+        bsz = x.size(0)
+        x = x.float()
+        y = y.float()
+        z = z.float()
 
-        # print (torch.max(ab[0]), 'max')
-        # print (torch.min(ab[0]), 'min')
-        # print (torch.mean(ab[0]), 'mean')
+        # print (torch.max(y[0]), 'max')
+        # print (torch.min(y[0]), 'min')
+        # print (torch.mean(y[0]), 'mean')
         if torch.cuda.is_available():
             index = index.cuda()
-            l = l.cuda()
-            ab = ab.cuda()
+            x = x.cuda()
+            y = y.cuda()
+            z = z.cuda()
             label = label.cuda()
 
         # ===================forward feature=====================
-        model_l.train()
-        model_ab.train()
-        encoder_l.train()
-        encoder_ab.train()
+        model_x.train()
+        model_y.train()
+        model_z.train()
+        encoder_x.train()
+        encoder_y.train()
+        encoder_z.train()
         # model.eval() # verify after loaded model, cmc loss start with 4.xx
         contrast.train()
         # contrast.eval()
-        feat_l, cls_l = model_l(l)
-        feat_ab, cls_ab = model_ab(ab) # [bs, 8, 2048]
-        # print (feat_l.size()) # [bs*8, 2048]
-        # print (cls_l.size()) # [bs*8]
+        feat_x, cls_x = model_x(x)
+        feat_y, cls_y = model_y(y) # [bs, 8, 2048]
+        feat_z, cls_z = model_z(z) # [bs, 8, 2048]
+        # print (feat_x.size()) # [bs*8, 2048]
+        # print (cls_x.size()) # [bs*8]
         if args.model == 'tsm':
             # ===================consensus feature=====================
             consensus = ConsensusModule('avg')
             # ===================forward encoder=====================
-            enc_l = encoder_l(feat_l)
-            enc_ab = encoder_ab(feat_ab)
-            enc_l = enc_l.view((-1, args.num_segments) + enc_l.size()[1:])
-            enc_ab = enc_ab.view((-1, args.num_segments) + enc_ab.size()[1:])
-            # print (enc_l.size())
-            enc_l = consensus(enc_l).squeeze()
-            enc_ab = consensus(enc_ab).squeeze()
-            # print (enc_l.size())
+            enc_x = encoder_x(feat_x)
+            enc_y = encoder_y(feat_y)
+            enc_z = encoder_z(feat_z)
+            enc_x = enc_x.view((-1, args.num_segments) + enc_x.size()[1:])
+            enc_y = enc_y.view((-1, args.num_segments) + enc_y.size()[1:])
+            enc_z = enc_z.view((-1, args.num_segments) + enc_z.size()[1:])
+            # print (enc_x.size())
+            enc_x = consensus(enc_x).squeeze()
+            enc_y = consensus(enc_y).squeeze()
+            enc_z = consensus(enc_z).squeeze()
+            # print (enc_x.size())
         elif args.model == 'i3d':
-            enc_l =  encoder_l(feat_l)
-            enc_ab = encoder_ab(feat_ab)
-        out_l, out_ab = contrast(enc_l, enc_ab, index)
-        l_loss = criterion_l(out_l)
-        ab_loss = criterion_ab(out_ab)
-        l_prob = out_l[:, 0].mean()
-        ab_prob = out_ab[:, 0].mean()
+            enc_x = encoder_x(feat_x)
+            enc_y = encoder_y(feat_y)
+            enc_z = encoder_z(feat_z)
+        out_x, out_y, out_z = contrast(enc_x, enc_y, enc_z, index)
+        x_loss = criterion_x(out_x)
+        y_loss = criterion_y(out_y)
+        z_loss = criterion_z(out_z)
+        x_prob = out_x[:, 0].mean()
+        y_prob = out_y[:, 0].mean()
+        z_prob = out_z[:, 0].mean()
 
-        loss = l_loss + ab_loss
+        loss = x_loss + y_loss + z_loss
 
         # check if loss is nan or inf
         loss.backward()
@@ -312,19 +338,23 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
             # print (model.encoder.module.l_to_ab.new_fc.weight.grad)
             # print (model.encoder.module.l_to_ab.new_fc.bias.grad)
             # print (model.encoder.module.l_to_ab.base_model.layer3[0].conv1.weight.grad) # learning_rate?
-            optimizer_l.step()
-            optimizer_ab.step()
-            optimizer_l.zero_grad()
-            optimizer_ab.zero_grad()
+            optimizer_x.step()
+            optimizer_y.step()
+            optimizer_z.step()
+            optimizer_x.zero_grad()
+            optimizer_y.zero_grad()
+            optimizer_z.zero_grad()
 
         # ===================meters=====================
         losses.update(loss.item(), bsz)
-        l_loss_meter.update(l_loss.item(), bsz)
-        l_prob_meter.update(l_prob.item(), bsz)
-        ab_loss_meter.update(ab_loss.item(), bsz)
-        ab_prob_meter.update(ab_prob.item(), bsz)
-        # cls_l_loss_meter.update(cls_l_loss.item(), bsz)
-        # cls_ab_loss_meter.update(cls_ab_loss.item(), bsz)
+        x_loss_meter.update(x_loss.item(), bsz)
+        x_prob_meter.update(x_prob.item(), bsz)
+        y_loss_meter.update(y_loss.item(), bsz)
+        y_prob_meter.update(y_prob.item(), bsz)
+        z_loss_meter.update(z_loss.item(), bsz)
+        z_prob_meter.update(z_prob.item(), bsz)
+        # cls_x_loss_meter.update(cls_l_loss.item(), bsz)
+        # cls_y_loss_meter.update(cls_ab_loss.item(), bsz)
         # acc_l_meter.update(acc_l, bsz)
         # acc_ab_meter.update(acc_ab, bsz)
 
@@ -338,16 +368,17 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'loss {loss.val:.3f} ({loss.avg:.3f})\t'
-                  'l_p {lprobs.val:.3f} ({lprobs.avg:.3f})\t'
-                  'ab_p {abprobs.val:.3f} ({abprobs.avg:.3f})'.format(
+                  'x_p {xprobs.val:.3f} ({xprobs.avg:.3f})\t'
+                  'y_p {xprobs.val:.3f} ({yprobs.avg:.3f})\t'
+                  'z_p {yprobs.val:.3f} ({zprobs.avg:.3f})'.format(
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, lprobs=l_prob_meter,
-                   abprobs=ab_prob_meter))
-            # print(out_l.shape)
+                   data_time=data_time, loss=losses, xprobs=x_prob_meter,
+                   yprobs=y_prob_meter, zprobs=z_prob_meter))
+            # print(out_x.shape)
             sys.stdout.flush()
 
-    # return l_loss_meter.avg, l_prob_meter.avg, ab_loss_meter.avg, ab_prob_meter.avg, cls_l_loss_meter.avg, cls_ab_loss_meter.avg 
-    return losses.avg, l_loss_meter.avg, ab_loss_meter.avg
+    # return x_loss_meter.avg, x_prob_meter.avg, y_loss_meter.avg, y_prob_meter.avg, cls_x_loss_meter.avg, cls_y_loss_meter.avg 
+    return losses.avg, x_loss_meter.avg, y_loss_meter.avg, z_loss_meter.avg
 
 def main():
 
@@ -366,19 +397,20 @@ def main():
     test_loader, _ = get_dataloaders(args=args, stage='test')
 
     # set the model
-    model_l, model_ab, encoder_l, encoder_ab, contrast, criterion_ab, criterion_l = set_model(args, n_data)
+    model_x, model_y, model_z, encoder_x, encoder_y, encoder_z, contrast, criterion_x, criterion_y, criterion_z = set_model(args, n_data)
 
-    # cls_l = nn.Linear(2048, args.num_classes)
-    # cls_ab = nn.Linear(2048, args.num_classes)
+    # cls_x = nn.Linear(2048, args.num_classes)
+    # cls_y = nn.Linear(2048, args.num_classes)
 
     # if torch.cuda.is_available():
-    #     cls_l = cls_l.cuda()
-    #     cls_ab = cls_ab.cuda()
+    #     cls_x = cls_x.cuda()
+    #     cls_y = cls_y.cuda()
     #     criterion_cls = criterion_cls.cuda()
 
     # set the optimizer
-    optimizer_l = set_optimizer(args, model_l, encoder_l)
-    optimizer_ab = set_optimizer(args, model_ab, encoder_ab)
+    optimizer_x = set_optimizer(args, model_x, encoder_x)
+    optimizer_y = set_optimizer(args, model_y, encoder_y)
+    optimizer_z = set_optimizer(args, model_z, encoder_z)
 
     # optionally resume from a checkpoint
     args.start_epoch = 1
@@ -387,12 +419,15 @@ def main():
             print("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume, map_location='cpu')
             args.start_epoch = checkpoint['epoch'] + 1
-            model_l.load_state_dict(checkpoint['model_l'])
-            encoder_l.load_state_dict(checkpoint['encoder_l'])
-            model_ab.load_state_dict(checkpoint['model_ab'])
-            encoder_ab.load_state_dict(checkpoint['encoder_ab'])
-            optimizer_l.load_state_dict(checkpoint['optimizer_l'])
-            optimizer_ab.load_state_dict(checkpoint['optimizer_ab'])
+            model_x.load_state_dict(checkpoint['model_x'])
+            model_y.load_state_dict(checkpoint['model_y'])
+            model_z.load_state_dict(checkpoint['model_z'])
+            encoder_x.load_state_dict(checkpoint['encoder_x'])
+            encoder_y.load_state_dict(checkpoint['encoder_y'])
+            encoder_z.load_state_dict(checkpoint['encoder_z'])
+            optimizer_x.load_state_dict(checkpoint['optimizer_x'])
+            optimizer_y.load_state_dict(checkpoint['optimizer_y'])
+            optimizer_z.load_state_dict(checkpoint['optimizer_z'])
             contrast.load_state_dict(checkpoint['contrast'])
             contrast.K = args.nce_k
             print("=> loaded checkpoint '{}' (epoch {})"
@@ -408,64 +443,50 @@ def main():
     # routine
     for epoch in range(args.start_epoch, args.epochs + 1):
 
-        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_l)
-        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_ab)
+        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_x)
+        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_y)
+        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_z)
         print("==> training...")
 
         time1 = time.time()
-        loss, l_loss, ab_loss = train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contrast, 
-                                        criterion_l, criterion_ab, optimizer_l, optimizer_ab, args)
+        loss, x_loss, y_loss, z_loss = train(epoch, train_loader, 
+                                        model_x, model_y, model_z, 
+                                        encoder_x, encoder_y, encoder_z, 
+                                        contrast, 
+                                        criterion_x, criterion_y, criterion_z,
+                                        optimizer_x, optimizer_y, optimizer_z,
+                                        args)
         time2 = time.time()
         print('epoch {} train, total time {:.2f}'.format(epoch, time2 - time1))
 
         # tensorboard logger
-        # logger.log_value('l_loss', l_loss, epoch)
-        # logger.log_value('l_prob', l_prob, epoch)
-        # logger.log_value('ab_loss', ab_loss, epoch)
-        # logger.log_value('ab_prob', ab_prob, epoch)
+        # logger.log_value('x_loss', x_loss, epoch)
+        # logger.log_value('x_prob', x_prob, epoch)
+        # logger.log_value('y_loss', y_loss, epoch)
+        # logger.log_value('y_prob', y_prob, epoch)
         logger.log_value('loss', loss, epoch)
-        logger.log_value('l_loss', l_loss, epoch)
-        logger.log_value('ab_loss', ab_loss, epoch)
-
-        # print("==> evaluating...")
-        
-        # time1 = time.time()
-        # cls_l_loss, cls_ab_loss = eval(epoch, eval_loader, model_l, model_ab, encoder_l, encoder_ab, contrast, 
-        #                                 criterion_l, criterion_ab, optimizer_l, optimizer_ab, args)
-        # time2 = time.time()
-        # print('epoch {} test, total time {:.2f}'.format(epoch, time2 - time1))
-
-        # # print("==> testing...")
-        
-        # # time1 = time.time()
-        # # cls_l_loss, cls_ab_loss = eval(epoch, test_loader, model, contrast, criterion_l, criterion_ab, criterion_cls,
-        # #                                          optimizer, args)
-        # # time2 = time.time()
-        # # print('epoch {} test, total time {:.2f}'.format(epoch, time2 - time1))
-        # # exit()
-        # # tensorboard logger
-        # # logger.log_value('l_loss', l_loss, epoch)
-        # # logger.log_value('l_prob', l_prob, epoch)
-        # # logger.log_value('ab_loss', ab_loss, epoch)
-        # # logger.log_value('ab_prob', ab_prob, epoch)
-        # logger.log_value('test_cls_l_loss', cls_l_loss, epoch)
-        # logger.log_value('test_cls_ab_loss', cls_ab_loss, epoch)
+        logger.log_value('x_loss', x_loss, epoch)
+        logger.log_value('y_loss', y_loss, epoch)
+        logger.log_value('z_loss', z_loss, epoch)
 
         # save the best model
         if loss < best_loss:
             best_loss = loss
             state = {
                 'opt': args,
-                'model_l': model_l.state_dict(),
-                'encoder_l': encoder_l.state_dict(),
-                'model_ab': model_ab.state_dict(),
-                'encoder_ab': encoder_ab.state_dict(),
+                'model_x': model_x.state_dict(),
+                'model_y': model_y.state_dict(),
+                'model_z': model_z.state_dict(),
+                'encoder_x': encoder_x.state_dict(),
+                'encoder_y': encoder_y.state_dict(),
+                'encoder_z': encoder_z.state_dict(),
                 'contrast': contrast.state_dict(),
-                'optimizer_l': optimizer_l.state_dict(),
-                'optimizer_ab': optimizer_ab.state_dict(),
+                'optimizer_x': optimizer_x.state_dict(),
+                'optimizer_y': optimizer_y.state_dict(),
+                'optimizer_z': optimizer_z.state_dict(),
                 'epoch': epoch,
             }
-            save_name = '{}_best.pth'.format(args.model)
+            save_name = '{}_{}_best.pth'.format(args.task, args.model)
             save_name = os.path.join(args.model_folder, save_name)
             print('saving best model!')
             torch.save(state, save_name)
@@ -475,18 +496,17 @@ def main():
             print('==> Saving...')
             state = {
                 'opt': args,
-                'model_l': model_l.state_dict(),
-                'encoder_l': encoder_l.state_dict(),
-                'model_ab': model_ab.state_dict(),
-                'encoder_ab': encoder_ab.state_dict(),
+                'model_x': model_x.state_dict(),
+                'model_y': model_y.state_dict(),
+                'model_z': model_z.state_dict(),
+                'encoder_x': encoder_x.state_dict(),
+                'encoder_y': encoder_y.state_dict(),
+                'encoder_z': encoder_z.state_dict(),
                 'contrast': contrast.state_dict(),
-                'optimizer_l': optimizer_l.state_dict(),
-                'optimizer_ab': optimizer_ab.state_dict(),
+                'optimizer_x': optimizer_x.state_dict(),
+                'optimizer_y': optimizer_y.state_dict(),
+                'optimizer_z': optimizer_z.state_dict(),
                 'epoch': epoch,
-                # 'cls_l': cls_l.state_dict(),
-                # 'cls_ab': cls_ab.state_dict(),
-                # 'cls_l_optimizer': cls_l_optimizer.state_dict(),
-                # 'cls_ab_optimizer': cls_ab_optimizer.state_dict(),
             }
             if args.amp:
                 state['amp'] = amp.state_dict()
