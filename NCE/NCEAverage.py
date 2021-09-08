@@ -88,9 +88,9 @@ class NCEAverage(nn.Module):
 def protoSimilarity(x, weight_y, weight_z, K=127, batchSize=16, inputSize=128):
     # ===================view x=====================
     pos_x = x.unsqueeze(1).contiguous().repeat(1, (K+1)^2, 1) # [bs, 1, 128] => [bs, (K+1)^2, 128]
-    feat_y = weight_y.unsqueeze(1)).repeat(1, K+1, 1, 1)
+    feat_y = weight_y.unsqueeze(1).repeat(1, K+1, 1, 1)
     feat_y = feat_y.contiguous().view(batchSize, (K+1)^2, inputSize) # [bs, K+1, K+1, 128] => [bs, (K+1)^2, 128]
-    feat_z = weight_z.unsqueeze(2)).repeat(1, 1, K+1, 1)
+    feat_z = weight_z.unsqueeze(2).repeat(1, 1, K+1, 1)
     feat_z = feat_z.contiguous().view(batchSize, (K+1)^2, inputSize) # [bs, K+1, K+1, 128] => [bs, (K+1)^2, 128]
     center = (pos_x + feat_y + feat_z) / 3 # [bs, (K+1)^2, 128]
     del_x = torch.norm(center - out_x, p=2, dim=-1) # # [bs, (K+1)^2]

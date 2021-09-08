@@ -41,8 +41,8 @@ def parse_option():
     parser.add_argument('--epochs', type=int, default=120, help='number of training epochs')
 
     # optimization
-    parser.add_argument('--learning_rate', type=float, default=2e-4, help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='20, 40, 60', help='where to decay lr, can be a list')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
+    parser.add_argument('--lr_decay_epochs', type=str, default='30, 60, 90', help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.2, help='decay rate for learning rate')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
     parser.add_argument('--weight_decay', type=float, default=0, help='weight decay')
@@ -58,7 +58,8 @@ def parse_option():
                                                                          'resnet50v2', 'resnet101v2', 'resnet18v2',
                                                                          'resnet50v3', 'resnet101v3', 'resnet18v3',
                                                                          'tsm', 'i3d'])
-    parser.add_argument('--model_path', type=str, default=None, help='the model to test')
+    parser.add_argument('--model_path', type=str, default=None, help='the model to load')
+    parser.add_argument('--linear_path', type=str, default=None, help='the model to load')
     parser.add_argument('--layer', type=int, default=6, help='which layer to evaluate')
 
     # dataset
@@ -101,14 +102,15 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
     
     opt.accum = int(opt.batch_size_glb / opt.batch_size)
+    if opt.linear_path is not None:
+        opt.learning_rate = 2e-4 
 
     # opt.model_name = opt.model_path.split('/')[-2]
     if opt.task is None:
         raise Exception('Task name is None.')
-    opt.model_name = '{}_data_{}_bsz_{}_lr_{}_decay_{}'.format(opt.task, opt.dataset, opt.batch_size_glb, opt.learning_rate,
-                                                                  opt.weight_decay)
+    opt.model_name = '{}_data_{}_bsz_{}_lr_{}'.format(opt.task, opt.dataset, opt.batch_size_glb, opt.learning_rate)
 
-    opt.tb_folder = os.path.join(opt.tb_path, opt.model_name + '_layer{}'.format(opt.layer))
+    opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
     if not os.path.isdir(opt.tb_folder):
         os.makedirs(opt.tb_folder)
 
@@ -212,17 +214,6 @@ def set_model(args):
     # ===================model y=====================
     model_y = model_y.cuda()
     model_y = nn.DataParallel(model_y)
-    if args.model_path:
-        # load pre-trained model
-        print('==> loading pre-trained cmc model')
-        ckpt = torch.load(args.model_path)
-        model_x.load_state_dict(ckpt['model_l']) # rgb
-        model_y.load_state_dict(ckpt['model_ab']) # depth
-        print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
-        print('==> done')
-        # model_x.eval()
-        # model_y.eval()
-
     # ===================classifier=====================
     classifier_x = classifier_x.cuda()
     classifier_x = nn.DataParallel(classifier_x)
@@ -237,6 +228,28 @@ def set_model(args):
     classifier.train()
 
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    if args.model_path:
+        # load pre-trained model
+        print('==> loading pre-trained cmc model')
+        ckpt = torch.load(args.model_path)
+        model_x.load_state_dict(ckpt['model_l']) # rgb
+        model_y.load_state_dict(ckpt['model_ab']) # depth
+        print("==> loaded checkpoint from cmc '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
+        print('==> done')
+        # model_x.eval()
+        # model_y.eval()
+    if args.linear_path:
+        # load pre-trained model
+        print('==> loading pre-trained cmc model')
+        ckpt = torch.load(args.linear   _path)
+        model_x.load_state_dict(ckpt['model_x']) # rgb
+        model_y.load_state_dict(ckpt['model_y']) # depth
+        classifier.load_state_dict(ckpt['classifier']) # depth
+        classifier_x.load_state_dict(ckpt['classifier_x']) # depth
+        classifier_y.load_state_dict(ckpt['classifier_y']) # depth
+        
+        print("==> loaded checkpoint from linear '{}' (epoch {})".format(args.linear_path, ckpt['epoch']))
+        print('==> done')
 
     return model_x, model_y, classifier_x, classifier_y, classifier, criterion
 
@@ -540,27 +553,16 @@ def main():
             if args.gpu is not None:
                 # best_acc1 may be from a checkpoint from a different GPU
                 best_acc1 = best_acc1.to(args.gpu)
+            model_x.load_state_dict(checkpoint['model_x'])
+            model_y.load_state_dict(checkpoint['model_y'])
             classifier.load_state_dict(checkpoint['classifier'])
+            classifier_x.load_state_dict(checkpoint['classifier_x'])
+            classifier_y.load_state_dict(checkpoint['classifier_y'])
             optimizer.load_state_dict(checkpoint['optimizer'])
+            optimizer_x.load_state_dict(checkpoint['optimizer_x'])
+            optimizer_y.load_state_dict(checkpoint['optimizer_y'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-
-    args.start_epoch = 1
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location='cpu')
-            args.start_epoch = checkpoint['epoch'] + 1
-            classifier.load_state_dict(checkpoint['classifier'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            best_acc1 = checkpoint['best_acc1']
-            best_acc1 = best_acc1.cuda()
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-            del checkpoint
-            torch.cuda.empty_cache()
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
@@ -570,9 +572,9 @@ def main():
     # routine
     for epoch in range(args.start_epoch, args.epochs + 1):
 
-        adjust_learning_rate(epoch - args.start_epoch, args, optimizer)
-        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_x)
-        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_y)
+        adjust_learning_rate(epoch, args, optimizer)
+        adjust_learning_rate(epoch, args, optimizer_x)
+        adjust_learning_rate(epoch, args, optimizer_y)
         print("==> training...")
 
         time1 = time.time()
