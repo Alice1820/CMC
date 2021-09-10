@@ -141,12 +141,11 @@ class NCEAverageXYZ(nn.Module):
         # sample
         weight_z = torch.index_select(self.memory_z, 0, idx.view(-1)).detach()
         weight_z = weight_z.view(batchSize, K + 1, inputSize)
+        out_x = protoSimilarity(x, weight_y, weight_z, K, batchSize, inputSize)
+        out_y = protoSimilarity(y, weight_x, weight_z, K, batchSize, inputSize)
+        out_z = protoSimilarity(z, weight_x, weight_y, K, batchSize, inputSize) # [bs, (K+1)^2]
 
         if self.use_softmax:
-            out_x = protoSimilarity(x, weight_y, weight_z, K, batchSize, inputSize)
-            out_y = protoSimilarity(y, weight_x, weight_z, K, batchSize, inputSize)
-            out_z = protoSimilarity(z, weight_x, weight_y, K, batchSize, inputSize) # [bs, (K+1)^2]
-
             out_x = torch.div(out_x, T)
             out_y = torch.div(out_y, T)
             out_z = torch.div(out_z, T)
@@ -155,7 +154,28 @@ class NCEAverageXYZ(nn.Module):
             out_z = out_z.contiguous()
             
         else:
-            raise Exception("3-view NCE loss not implemented.")
+            # raise Exception("3-view NCE loss not implemented.")
+            out_x = torch.exp(torch.div(out_x, T))
+            out_y = torch.exp(torch.div(out_y, T))
+            out_z = torch.exp(torch.div(out_z, T))
+            # set Z_0 if haven't been set yet,
+            # Z_0 is used as a constant approximation of Z, to scale the probs
+            if Z_x < 0:
+                self.params[2] = out_x.mean() * outputSize
+                Z_x = self.params[2].clone().detach().item()
+                print("normalization constant Z_x is set to {:.1f}".format(Z_x))
+            if Z_y < 0:
+                self.params[3] = out_y.mean() * outputSize
+                Z_y = self.params[3].clone().detach().item()
+                print("normalization constant Z_y is set to {:.1f}".format(Z_y))
+            if Z_z < 0:
+                self.params[4] = out_z.mean() * outputSize
+                Z_z = self.params[4].clone().detach().item()
+                print("normalization constant Z_z is set to {:.1f}".format(Z_z))
+            # compute out_l, out_ab
+            out_x = torch.div(out_x, Z_x).contiguous()
+            out_y = torch.div(out_y, Z_y).contiguous()
+            out_z = torch.div(out_z, Z_z).contiguous()
 
         # # update memory
         with torch.no_grad():
