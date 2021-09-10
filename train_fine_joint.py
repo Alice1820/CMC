@@ -241,7 +241,7 @@ def set_model(args):
     if args.linear_path:
         # load pre-trained model
         print('==> loading pre-trained cmc model')
-        ckpt = torch.load(args.linear   _path)
+        ckpt = torch.load(args.linear_path)
         model_x.load_state_dict(ckpt['model_x']) # rgb
         model_y.load_state_dict(ckpt['model_y']) # depth
         classifier.load_state_dict(ckpt['classifier']) # depth
@@ -572,9 +572,9 @@ def main():
     # routine
     for epoch in range(args.start_epoch, args.epochs + 1):
 
-        adjust_learning_rate(epoch, args, optimizer)
-        adjust_learning_rate(epoch, args, optimizer_x)
-        adjust_learning_rate(epoch, args, optimizer_y)
+        # adjust_learning_rate(epoch, args, optimizer)
+        # adjust_learning_rate(epoch, args, optimizer_x)
+        # adjust_learning_rate(epoch, args, optimizer_y)
         print("==> training...")
 
         time1 = time.time()

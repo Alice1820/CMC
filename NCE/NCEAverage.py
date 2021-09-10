@@ -87,19 +87,19 @@ class NCEAverage(nn.Module):
 
 def protoSimilarity(x, weight_y, weight_z, K=127, batchSize=16, inputSize=128):
     # ===================view x=====================
-    pos_x = x.unsqueeze(1).contiguous().repeat(1, (K+1)^2, 1) # [bs, 1, 128] => [bs, (K+1)^2, 128]
+    pos_x = x.unsqueeze(1).contiguous().repeat(1, (K+1)*(K+1), 1) # [bs, 1, 128] => [bs, (K+1)^2, 128]
     feat_y = weight_y.unsqueeze(1).repeat(1, K+1, 1, 1)
-    feat_y = feat_y.contiguous().view(batchSize, (K+1)^2, inputSize) # [bs, K+1, K+1, 128] => [bs, (K+1)^2, 128]
+    feat_y = feat_y.contiguous().view(batchSize, (K+1)*(K+1), inputSize) # [bs, K+1, K+1, 128] => [bs, (K+1)^2, 128]
     feat_z = weight_z.unsqueeze(2).repeat(1, 1, K+1, 1)
-    feat_z = feat_z.contiguous().view(batchSize, (K+1)^2, inputSize) # [bs, K+1, K+1, 128] => [bs, (K+1)^2, 128]
+    feat_z = feat_z.contiguous().view(batchSize, (K+1)*(K+1), inputSize) # [bs, K+1, K+1, 128] => [bs, (K+1)^2, 128]
     center = (pos_x + feat_y + feat_z) / 3 # [bs, (K+1)^2, 128]
-    del_x = torch.norm(center - out_x, p=2, dim=-1) # # [bs, (K+1)^2]
+    del_x = torch.norm(center - pos_x, p=2, dim=-1) # # [bs, (K+1)^2]
     out_x = del_x * (-1)
     return out_x
 
 class NCEAverageXYZ(nn.Module):
 
-    def __init__(self, inputSize=128, outputSize=37800, K, T=0.07, momentum=0.5, use_softmax=False):
+    def __init__(self, inputSize=128, outputSize=37800, K=511, T=7.0, momentum=0.5, use_softmax=False):
         super(NCEAverageXYZ, self).__init__()
         self.nLem = outputSize
         self.unigrams = torch.ones(self.nLem)
@@ -108,7 +108,7 @@ class NCEAverageXYZ(nn.Module):
         self.K = K
         self.use_softmax = use_softmax
 
-        self.register_buffer('params', torch.tensor([K, T, -1, -1, momentum]))
+        self.register_buffer('params', torch.tensor([K, T, -1, -1, -1, momentum]))
         stdv = 1. / math.sqrt(inputSize / 3)
         self.register_buffer('memory_x', torch.rand(outputSize, inputSize).mul_(2 * stdv).add_(-stdv))
         self.register_buffer('memory_y', torch.rand(outputSize, inputSize).mul_(2 * stdv).add_(-stdv))
@@ -161,7 +161,7 @@ class NCEAverageXYZ(nn.Module):
         with torch.no_grad():
             x_pos = torch.index_select(self.memory_x, 0, index.view(-1))
             x_pos.mul_(momentum)
-            x_pos.add_(torch.mul(l, 1 - momentum))
+            x_pos.add_(torch.mul(x, 1 - momentum))
             x_norm = x_pos.pow(2).sum(1, keepdim=True).pow(0.5)
             updated_x = x_pos.div(x_norm)
             self.memory_x.index_copy_(0, index, updated_x)

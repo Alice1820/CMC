@@ -115,7 +115,7 @@ class NormalizeLen(object):
             dep = dep[indices_dep, :, :, :]
         
         if ir.shape[0] != 1:
-            num_frames_dep = len(ir)
+            num_frames_ir = len(ir)
             indices_ir = np.linspace(0, num_frames_ir - 1, self.vid_len[0]).astype(int)
             ir = ir[indices_ir, :, :, :]
 

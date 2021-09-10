@@ -18,12 +18,13 @@ from torchvision import transforms, datasets
 from util import adjust_learning_rate, AverageMeter, accuracy
 
 from models.alexnet import MyAlexNetCMC
-from models.resnet import MyResNetsCMC
+from models.resnet import MyResNetsCMC, Normalize
 from models.LinearModel import LinearClassifierAlexNet, LinearClassifierResNet
 from models.tsm import MyTSMCMC, TSN, ConsensusModule
 from models.i3d import I3D
 
-from datasets.ntu import NTU, get_dataloaders, get_dataloaders_v3
+from datasets.ntuv3 import get_dataloaders_v3
+
 
 # from spawn import spawn
 
@@ -255,7 +256,7 @@ def set_model(args):
 
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    return model_x, model_y, classifier_x, classifier_y, classifier, criterion
+    return model_x, model_y, model_z, classifier_x, classifier_y, classifier_z, classifier, criterion
 
 
 def set_optimizer_joint(args, model, classifier):
@@ -332,6 +333,10 @@ def train(epoch, train_loader, model_x, model_y, model_z, \
         # ===================consensus feature=====================
         if opt.model == 'tsm':
             consensus = ConsensusModule('avg')
+            l2norm = Normalize(2)
+            feat_x = l2norm(feat_x)
+            feat_y = l2norm(feat_y)
+            feat_z = l2norm(feat_z)
             enc = classifier(feat) # [bs, 8, 120]
             enc_x = classifier_x(feat_x) # [bs, 8, 120]
             enc_y = classifier_y(feat_y) # [bs, 8, 120]
@@ -593,13 +598,13 @@ def main():
     # train_loader, n_data = get_train_loader('train', args)
     # val_loader, _ = get_train_loader('dev', args)
         # set the loader
-    train100_loader, n_data = get_dataloaders(args=args, stage='train')
-    train5_loader, n_data = get_dataloaders(args=args, stage='train5')
-    train25_loader, n_data = get_dataloaders(args=args, stage='train25')
-    train50_loader, n_data = get_dataloaders(args=args, stage='train50')
+    train100_loader, n_data = get_dataloaders_v3(args=args, stage='train')
+    train5_loader, n_data = get_dataloaders_v3(args=args, stage='train5')
+    train25_loader, n_data = get_dataloaders_v3(args=args, stage='train25')
+    train50_loader, n_data = get_dataloaders_v3(args=args, stage='train50')
     train_loader = {'train100': train100_loader, 'train5': train5_loader, 'train25': train25_loader, 'train50': train50_loader}[args.dataset]
-    eval_loader, _ = get_dataloaders(args=args, stage='dev')
-    test_loader, _ = get_dataloaders(args=args, stage='test')
+    eval_loader, _ = get_dataloaders_v3(args=args, stage='dev')
+    test_loader, _ = get_dataloaders_v3(args=args, stage='test')
     # set the model
     model_x, model_y, model_z, \
     classifier_x, classifier_y, classifier_z, classifier, \
@@ -655,9 +660,9 @@ def main():
         # routine
         for epoch in range(args.start_epoch, args.epochs + 1):
 
-            adjust_learning_rate(epoch, args, optimizer)
-            adjust_learning_rate(epoch, args, optimizer_x)
-            adjust_learning_rate(epoch, args, optimizer_y)
+            # adjust_learning_rate(epoch, args, optimizer)
+            # adjust_learning_rate(epoch, args, optimizer_x)
+            # adjust_learning_rate(epoch, args, optimizer_y)
             print("==> training...")
 
             time1 = time.time()

@@ -572,9 +572,9 @@ def main():
         # routine
         for epoch in range(args.start_epoch, args.epochs + 1):
 
-            adjust_learning_rate(epoch, args, optimizer)
-            adjust_learning_rate(epoch, args, optimizer_x)
-            adjust_learning_rate(epoch, args, optimizer_y)
+            # adjust_learning_rate(epoch, args, optimizer)
+            # adjust_learning_rate(epoch, args, optimizer_x)
+            # adjust_learning_rate(epoch, args, optimizer_y)
             print("==> training...")
 
             time1 = time.time()

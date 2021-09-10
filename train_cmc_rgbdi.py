@@ -22,15 +22,16 @@ from datasets.dataset import RGB2Lab, RGB2YCbCr
 from util import adjust_learning_rate, AverageMeter
 
 from models.alexnet import MyAlexNetCMC
-from models.resnet import MyResNetsCMC
+from models.resnet import MyResNetsCMC, Normalize
 from models.i3d import MyI3DCMC, I3D
 from models.tsm import MyTSMCMC, TSN, ConsensusModule
-from NCE.NCEAverage import NCEAverage
+from NCE.NCEAverage import NCEAverageXYZ
 from NCE.NCECriterion import NCECriterion
 from NCE.NCECriterion import NCESoftmaxLoss
 
 from datasets.dataset import ImageFolderInstance
-from datasets.ntu import NTU, get_dataloaders
+from datasets.ntu import get_dataloaders
+from datasets.ntuv3 import get_dataloaders_v3
 
 try:
     from apex import amp, optimizers
@@ -75,7 +76,7 @@ def parse_option():
     parser.add_argument('--base_model', type=str, default='resnet18')
     parser.add_argument('--softmax', action='store_true', help='using softmax contrastive loss rather than NCE')
     parser.add_argument('--nce_k', type=int, default=511)
-    parser.add_argument('--nce_t', type=float, default=0.07)
+    parser.add_argument('--nce_t', type=float, default=7.0)
     parser.add_argument('--nce_m', type=float, default=0.5)
     parser.add_argument('--feat_dim', type=int, default=128, help='dim of feat for inner product')
 
@@ -112,6 +113,7 @@ def parse_option():
     if opt.dataset == 'imagenet':
         if 'alexnet' not in opt.model:
             opt.crop_low = 0.08
+            l2norm = Normalize(2)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -202,7 +204,7 @@ def set_model(args, n_data):
     else:
         raise Exception("model not implemented.")
 
-    contrast = NCEAverage(args.feat_dim, n_data, args.nce_k, args.nce_t, args.nce_m, args.softmax)
+    contrast = NCEAverageXYZ(args.feat_dim, n_data, args.nce_k, args.nce_t, args.nce_m, args.softmax)
     criterion_x = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
     criterion_y = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
     criterion_z = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
@@ -303,10 +305,11 @@ def train(epoch, train_loader,
         if args.model == 'tsm':
             # ===================consensus feature=====================
             consensus = ConsensusModule('avg')
+            l2norm = Normalize(2)
             # ===================forward encoder=====================
-            enc_x = encoder_x(feat_x)
-            enc_y = encoder_y(feat_y)
-            enc_z = encoder_z(feat_z)
+            enc_x = l2norm(encoder_x(feat_x))
+            enc_y = l2norm(encoder_y(feat_y))
+            enc_z = l2norm(encoder_z(feat_z))
             enc_x = enc_x.view((-1, args.num_segments) + enc_x.size()[1:])
             enc_y = enc_y.view((-1, args.num_segments) + enc_y.size()[1:])
             enc_z = enc_z.view((-1, args.num_segments) + enc_z.size()[1:])
@@ -392,9 +395,9 @@ def main():
     # test_loader, _ = get_train_loader(split='test', args=args)
 
     # set the loader
-    train_loader, n_data = get_dataloaders(args=args, stage='train')
-    eval_loader, _ = get_dataloaders(args=args, stage='dev')
-    test_loader, _ = get_dataloaders(args=args, stage='test')
+    train_loader, n_data = get_dataloaders_v3(args=args, stage='train')
+    eval_loader, _ = get_dataloaders_v3(args=args, stage='dev')
+    test_loader, _ = get_dataloaders_v3(args=args, stage='test')
 
     # set the model
     model_x, model_y, model_z, encoder_x, encoder_y, encoder_z, contrast, criterion_x, criterion_y, criterion_z = set_model(args, n_data)

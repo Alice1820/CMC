@@ -22,7 +22,7 @@ from datasets.dataset import RGB2Lab, RGB2YCbCr
 from util import adjust_learning_rate, AverageMeter
 
 from models.alexnet import MyAlexNetCMC
-from models.resnet import MyResNetsCMC
+from models.resnet import MyResNetsCMC, Normalize
 from models.i3d import MyI3DCMC, I3D
 from models.tsm import MyTSMCMC, TSN, ConsensusModule
 from NCE.NCEAverage import NCEAverage
@@ -283,9 +283,10 @@ def train(epoch, train_loader, model_l, model_ab, encoder_l, encoder_ab, contras
         if args.model == 'tsm':
             # ===================consensus feature=====================
             consensus = ConsensusModule('avg')
+            l2norm = Normalize(2)
             # ===================forward encoder=====================
-            enc_l = encoder_l(feat_l)
-            enc_ab = encoder_ab(feat_ab)
+            enc_l = l2norm(encoder_l(feat_l))
+            enc_ab = l2norm(encoder_ab(feat_ab))
             enc_l = enc_l.view((-1, args.num_segments) + enc_l.size()[1:])
             enc_ab = enc_ab.view((-1, args.num_segments) + enc_ab.size()[1:])
             # print (enc_l.size())
@@ -408,8 +409,8 @@ def main():
     # routine
     for epoch in range(args.start_epoch, args.epochs + 1):
 
-        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_l)
-        adjust_learning_rate(epoch - args.start_epoch, args, optimizer_ab)
+        # adjust_learning_rate(epoch - args.start_epoch, args, optimizer_l)
+        # adjust_learning_rate(epoch - args.start_epoch, args, optimizer_ab)
         print("==> training...")
 
         time1 = time.time()
