@@ -99,7 +99,7 @@ def protoSimilarity(x, weight_y, weight_z, K=127, batchSize=16, inputSize=128):
 
 class NCEAverageXYZ(nn.Module):
 
-    def __init__(self, inputSize=128, outputSize=37800, K=511, T=7.0, momentum=0.5, use_softmax=False):
+    def __init__(self, inputSize=128, outputSize=37800, K=127, T=0.07, momentum=0.5, use_softmax=False):
         super(NCEAverageXYZ, self).__init__()
         self.nLem = outputSize
         self.unigrams = torch.ones(self.nLem)
@@ -162,14 +162,17 @@ class NCEAverageXYZ(nn.Module):
             # Z_0 is used as a constant approximation of Z, to scale the probs
             if Z_x < 0:
                 self.params[2] = out_x.mean() * outputSize
+                # self.params[2] = out_x.mean()
                 Z_x = self.params[2].clone().detach().item()
                 print("normalization constant Z_x is set to {:.1f}".format(Z_x))
             if Z_y < 0:
                 self.params[3] = out_y.mean() * outputSize
+                # self.params[3] = out_y.mean()
                 Z_y = self.params[3].clone().detach().item()
                 print("normalization constant Z_y is set to {:.1f}".format(Z_y))
             if Z_z < 0:
                 self.params[4] = out_z.mean() * outputSize
+                # self.params[4] = out_z.mean()
                 Z_z = self.params[4].clone().detach().item()
                 print("normalization constant Z_z is set to {:.1f}".format(Z_z))
             # compute out_l, out_ab

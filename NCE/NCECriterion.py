@@ -15,7 +15,7 @@ class NCECriterion(nn.Module):
     def forward(self, x):
         # print (x[0])
         bsz = x.shape[0]
-        m = x.size(1) - 1
+        m = x.size(1) - 1 # K
 
         # noise distribution
         Pn = 1 / float(self.n_data)
