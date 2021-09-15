@@ -242,9 +242,9 @@ def set_model(args, n_data):
     return model_x, model_y, encoder_x, encoder_y, contrast, criterion_y, criterion_x
 
 
-def set_optimizer(args, model, encoder, classifier):
+def set_optimizer(args, model, encoder):
     # return optimizer
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(encoder.parameters() + list(classifier.parameters())),
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(encoder.parameters())),
                                 lr=args.learning_rate,
                                 betas=[args.beta1, args.beta2])
     return optimizer
@@ -430,6 +430,92 @@ def train(epoch, labeled_loader, unlabeled_loader, model_x, model_y, encoder_x, 
     # return l_loss_meter.avg, l_prob_meter.avg, ab_loss_meter.avg, ab_prob_meter.avg, cls_l_loss_meter.avg, cls_ab_loss_meter.avg 
     return losses.avg, l_loss_meter.avg, ab_loss_meter.avg, top1_x.avg, top5_x.avg, losses_x.avg, top1_y.avg, top5_y.avg, losses_y.avg
 
+def validate(val_loader, model_x, model_y, criterion, opt):
+    """
+    evaluation
+    """
+    batch_time = AverageMeter()
+    losses = AverageMeter()
+    losses_x = AverageMeter()
+    losses_y = AverageMeter()
+    top1 = AverageMeter()
+    top1_x = AverageMeter()
+    top1_y = AverageMeter()
+    top5 = AverageMeter()
+    top5_x = AverageMeter()
+    top5_y = AverageMeter()
+
+    # switch to evaluate mode
+    model_x.eval()
+    model_y.eval()
+
+    with torch.no_grad():
+        end = time.time()
+        for idx, (inputs, index) in enumerate(val_loader):
+
+            input_x = inputs['rgb']
+            input_y = inputs['dep']
+            input_x = input_x.float()
+            input_y = input_y.float()
+            target = inputs['label']
+            if opt.gpu is not None:
+                input_x = input_x.cuda(opt.gpu, non_blocking=True)
+                input_y = input_y.cuda(opt.gpu, non_blocking=True)
+            target = target.cuda(opt.gpu, non_blocking=True)
+            # ===================forward=====================
+            _, logit_l = model_x(input_x) # [bs, 8, 512]
+            _, logit_ab = model_y(input_y) # [bs, 8, 512]
+            # feat = torch.cat((feat_l.detach(), feat_ab.detach()), dim=1)
+
+            # ===================consensus feature=====================
+            if opt.model == 'tsm':
+                consensus = ConsensusModule('avg')
+                logit_l = logit_l.view((-1, args.num_segments) + logit_l.size()[1:])
+                logit_ab = logit_ab.view((-1, args.num_segments) + logit_ab.size()[1:])
+                logit_l = consensus(logit_l).squeeze()
+                logit_ab = consensus(logit_ab).squeeze()
+            # print (output.size()) # [bs, 120]
+            loss_x = criterion(logit_l, target)
+            loss_y = criterion(logit_ab, target)
+
+            acc1_x, acc5_x = accuracy(output_x, target, topk=(1, 5))
+            acc1_y, acc5_y = accuracy(output_y, target, topk=(1, 5))
+            losses_x.update(loss_x.item(), input_x.size(0))
+            losses_y.update(loss_y.item(), input_y.size(0))
+            top1.update(acc1[0], input_x.size(0))
+            top1_x.update(acc1_x[0], input_x.size(0))
+            top1_y.update(acc1_y[0], input_y.size(0))
+            top5.update(acc5[0], input_x.size(0))
+            top5_x.update(acc5_x[0], input_x.size(0))
+            top5_y.update(acc5_y[0], input_y.size(0))
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            if idx % opt.print_freq == 0:
+                print('Test: ViewX: [{0}/{1}]\t'
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                      'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                       idx, len(val_loader), batch_time=batch_time, loss=losses_x,
+                       top1=top1_x, top5=top5_x))
+                print('Test ViewY: [{0}/{1}]\t'
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                      'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                       idx, len(val_loader), batch_time=batch_time, loss=losses_y,
+                       top1=top1_y, top5=top5_y))
+                print ('')
+
+        print(' *[ViewX] Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1_x, top5=top5_x))
+        print(' *[ViewY] Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1_y, top5=top5_y))
+
+    return top1_x.avg, top5_x.avg, losses_x.avg, top1_y.avg, top5_y.avg, losses_y.avg
+
+
 def main():
 
     best_loss = 1e3
@@ -442,8 +528,8 @@ def main():
     # test_loader, _ = get_train_loader(split='test', args=args)
 
     # set the loader
-    unlabaled_loader, n_data = get_dataloaders(args=args, stage='train')
-    labaled_loader, _ = get_dataloaders(args=args, stage='train5') # 5% labeled data
+    unlabeled_loader, n_data = get_dataloaders(args=args, stage='train')
+    labeled_loader, _ = get_dataloaders(args=args, stage='train5') # 5% labeled data
     eval_loader, _ = get_dataloaders(args=args, stage='dev')
     test_loader, _ = get_dataloaders(args=args, stage='test')
 
@@ -459,8 +545,8 @@ def main():
     #     criterion_cls = criterion_cls.cuda()
 
     # set the optimizer
-    optimizer_x = set_optimizer(args, model_x, encoder_x, classifier_x)
-    optimizer_y = set_optimizer(args, model_y, encoder_y, classifier_y)
+    optimizer_x = set_optimizer(args, model_x, encoder_x)
+    optimizer_y = set_optimizer(args, model_y, encoder_y)
 
     # optionally resume from a checkpoint
     args.start_epoch = 1
@@ -543,9 +629,6 @@ def main():
         top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
                                                     validate(eval_loader, model_x, model_y, criterion, args)
 
-        logger.log_value('joint/eval_acc', top1, epoch)
-        logger.log_value('joint/eval_acc5', top5, epoch)
-        logger.log_value('joint/eval_loss', losses, epoch)
         logger.log_value('x/eval_acc', top1_x, epoch)
         logger.log_value('x/eval_acc5', top5_x, epoch)
         logger.log_value('x/eval_loss', losses_x, epoch)
