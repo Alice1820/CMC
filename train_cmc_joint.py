@@ -48,9 +48,9 @@ def parse_option():
     parser.add_argument('--print_freq', type=int, default=10, help='print frequency')
     parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
     parser.add_argument('--save_freq', type=int, default=2, help='save frequency')
-    parser.add_argument('--batch_size', type=int, default=128, help='batch_size')
+    parser.add_argument('--batch_size', type=int, default=128   , help='batch_size')
     parser.add_argument('--batch_size_glb', type=int, default=128, help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=16, help='num of workers to use')
+    parser.add_argument('--num_workers', type=int, default=8, help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=240, help='number of training epochs')
 
     # optimization
@@ -63,8 +63,8 @@ def parse_option():
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 
     # resume path
-    parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                        help='path to latest checkpoint (default: none)')   
+    parser.add_argument('--resume', default='', type=str, metavar='PATH', help='path to latest checkpoint (default: none)')   
+    parser.add_argument('--test', default='', type=str, metavar='PATH', help='path to latest checkpoint (default: none)')   
 
     # model definition
     parser.add_argument('--model', type=str, default='tsm', choices=['alexnet',
@@ -124,8 +124,7 @@ def parse_option():
     opt.method = 'softmax' if opt.softmax else 'nce'
     if opt.task is None:
         raise Exception('Task name is None.')
-    opt.model_name = '{}_{}_{}_{}_lr_{}_decay_{}_bsz_{}_view_RGBD'.format(opt.task, opt.method, opt.nce_k, opt.model, opt.learning_rate,
-                                                                    opt.weight_decay, opt.batch_size_glb)
+    opt.model_name = '{}_{}_{}_{}_lam_bsz_{}_view_RGBD'.format(opt.task, opt.method, opt.nce_k, opt.model, opt.lambda_u, opt.batch_size_glb)
 
     if opt.amp:
         opt.model_name = '{}_amp_{}'.format(opt.model_name, opt.opt_level)
@@ -187,8 +186,8 @@ def get_train_loader(split='train', args=None):
 def set_model(args, n_data):
     # set the model
     if args.model == 'tsm':
-        model_x  = TSN(num_class=args.num_classes)
-        model_y  = TSN(num_class=args.num_classes)
+        model_x  = TSN(num_class=args.num_class)
+        model_y  = TSN(num_class=args.num_class)
         encoder_x = nn.Linear(512, args.feat_dim) # [2048, 128]
         encoder_y = nn.Linear(512, args.feat_dim)
         # classifier_x = nn.Linear(512, 120)
@@ -208,8 +207,7 @@ def set_model(args, n_data):
     contrast = NCEAverage(args.feat_dim, n_data, args.nce_k, args.nce_t, args.nce_m, args.softmax)
     criterion_x = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
     criterion_y = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-
+    criterion = nn.CrossEntropyLoss()
     # ===================classifier=====================
     # classifier_x = classifier_x.cuda()
     # classifier_x = nn.DataParallel(classifier_x)
@@ -231,6 +229,7 @@ def set_model(args, n_data):
         contrast = contrast.cuda()
         criterion_y = criterion_y.cuda()
         criterion_x = criterion_x.cuda()
+        criterion = criterion.cuda()
         cudnn.benchmark = True
         model_x = nn.DataParallel(model_x)
         model_y = nn.DataParallel(model_y)
@@ -239,12 +238,12 @@ def set_model(args, n_data):
         # contrast = nn.DataParallel(contrast)
 
     # return model_x, model_y, encoder_x, encoder_y, contrast, criterion_y, criterion_x, classifier_x, classifier_y, classifier, criterion
-    return model_x, model_y, encoder_x, encoder_y, contrast, criterion_y, criterion_x
+    return model_x, model_y, encoder_x, encoder_y, contrast, criterion_y, criterion_x, criterion
 
 
 def set_optimizer(args, model, encoder):
     # return optimizer
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(encoder.parameters())),
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(encoder.parameters()),
                                 lr=args.learning_rate,
                                 betas=[args.beta1, args.beta2])
     return optimizer
@@ -258,6 +257,8 @@ def train(epoch, labeled_loader, unlabeled_loader, model_x, model_y, encoder_x, 
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
+    losses_x = AverageMeter()
+    losses_y = AverageMeter()
     l_loss_meter = AverageMeter()
     ab_loss_meter = AverageMeter()
     l_prob_meter = AverageMeter()
@@ -279,16 +280,24 @@ def train(epoch, labeled_loader, unlabeled_loader, model_x, model_y, encoder_x, 
 
     labeled_iter = iter(labeled_loader)
     unlabeled_iter = iter(unlabeled_loader)
-    for _ in range(len(unlabeled_loader)):
+    for idx in range(len(labeled_loader)):
         data_time.update(time.time() - end)
-        inputs, index = labeled_iter.next()
-        inputs_u, index_u = unlabeled_iter.next()
+        try:
+            inputs, index = labeled_iter.next()
+        except:
+            labeled_iter = iter(labeled_loader)
+            inputs, index = labeled_iter.next()
+        try:
+            inputs_u, index_u = unlabeled_iter.next()
+        except:
+            unlabeled_iter = iter(unlabeled_loader)
+            inputs_u, index_u = unlabeled_iter.next()
         # l, ab = inputs['rgb'], inputs['rgb']
         l, ab = inputs['rgb'], inputs['dep']
+        label = inputs['label']
         l_u, ab_u = inputs_u['rgb'], inputs_u['dep']
         # print (l.size())
         # print (ab.size())
-        label = inputs['label']
         bsz = l.size(0)
         l = l.float()
         ab = ab.float()
@@ -318,10 +327,9 @@ def train(epoch, labeled_loader, unlabeled_loader, model_x, model_y, encoder_x, 
         _, logit_l = model_x(l)
         _, logit_ab = model_y(ab) # [bs, 8, 2048]
         # ===================unsupervised=====================
-        feat_ab, _ = model_y(ab_u) # [bs, 8, 2048]
         feat_l, _ = model_x(l_u)
-        # print (feat_l.size()) # [bs*8, 2048]
-        # print (cls_l.size()) # [bs*8]
+        feat_ab, _ = model_y(ab_u) # [bs, 8, 2048]
+        # print (logit_l.size()) # [bs, 120]
         if args.model == 'tsm':
             # ===================consensus feature=====================
             consensus = ConsensusModule('avg')
@@ -331,24 +339,24 @@ def train(epoch, labeled_loader, unlabeled_loader, model_x, model_y, encoder_x, 
             enc_ab = l2norm(encoder_y(feat_ab))
             enc_l = enc_l.view((-1, args.num_segments) + enc_l.size()[1:])
             enc_ab = enc_ab.view((-1, args.num_segments) + enc_ab.size()[1:])
-            logit_l = logit_l.view((-1, args.num_segments) + logit_l.size()[1:])
-            logit_ab = logit_ab.view((-1, args.num_segments) + logit_ab.size()[1:])
+            # logit_l = logit_l.view((-1, args.num_segments) + logit_l.size()[1:])
+            # logit_ab = logit_ab.view((-1, args.num_segments) + logit_ab.size()[1:])
             # print (enc_l.size())
             enc_l = consensus(enc_l).squeeze()
             enc_ab = consensus(enc_ab).squeeze()
-            logit_l = consensus(logit_l).squeeze()
-            logit_ab = consensus(logit_ab).squeeze()
+            # logit_l = consensus(logit_l).squeeze()
+            # logit_ab = consensus(logit_ab).squeeze()
             # print (enc_l.size())
         elif args.model == 'i3d':
             enc_l =  encoder_x(feat_l)
-            enc_ab = encoder_y(feat_ab)
+            enc_ab = encoder_y(feat_ab) 
         out_l, out_ab = contrast(enc_l, enc_ab, index)
         l_loss = criterion_x(out_l)
         ab_loss = criterion_y(out_ab)
         l_prob = out_l[:, 0].mean()
         ab_prob = out_ab[:, 0].mean()
-        cls_l_loss = criterion(logit_l)
-        cls_ab_loss = criterion(logit_ab)
+        cls_l_loss = criterion(logit_l, label)
+        cls_ab_loss = criterion(logit_ab, label)
 
         us_loss = l_loss + ab_loss
         ss_loss = cls_l_loss + cls_ab_loss
@@ -375,16 +383,14 @@ def train(epoch, labeled_loader, unlabeled_loader, model_x, model_y, encoder_x, 
         ab_prob_meter.update(ab_prob.item(), bsz)
         cls_l_loss_meter.update(cls_l_loss.item(), bsz)
         cls_ab_loss_meter.update(cls_ab_loss.item(), bsz)
-        acc_l_meter.update(acc_l, bsz)
-        acc_ab_meter.update(acc_ab, bsz)
+        # acc_l_meter.update(acc_l, bsz)
+        # acc_ab_meter.update(acc_ab, bsz)
         # ===================accuracy=====================
         # acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        acc1_x, acc5_x = accuracy(logit_l, target, topk=(1, 5))
-        acc1_y, acc5_y = accuracy(logit_ab, target, topk=(1, 5))
-        top1.update(acc1[0], bsz)
+        acc1_x, acc5_x = accuracy(logit_l, label, topk=(1, 5))
+        acc1_y, acc5_y = accuracy(logit_ab, label, topk=(1, 5))
         top1_x.update(acc1_x[0], bsz)
         top1_y.update(acc1_y[0], bsz)
-        top5.update(acc5[0], bsz)
         top5_x.update(acc5_x[0], bsz)
         top5_y.update(acc5_y[0], bsz)
         # losses.update(loss.item(), input_x.size(0))
@@ -458,34 +464,32 @@ def validate(val_loader, model_x, model_y, criterion, opt):
             input_x = input_x.float()
             input_y = input_y.float()
             target = inputs['label']
-            if opt.gpu is not None:
-                input_x = input_x.cuda(opt.gpu, non_blocking=True)
-                input_y = input_y.cuda(opt.gpu, non_blocking=True)
-            target = target.cuda(opt.gpu, non_blocking=True)
+            if torch.cuda.is_available():
+                input_x = input_x.cuda()
+                input_y = input_y.cuda()
+                target = target.cuda()
             # ===================forward=====================
             _, logit_l = model_x(input_x) # [bs, 8, 512]
-            _, logit_ab = model_y(input_y) # [bs, 8, 512]
+            _, logit_ab = model_y(input_y)   # [bs, 8, 512]
             # feat = torch.cat((feat_l.detach(), feat_ab.detach()), dim=1)
 
             # ===================consensus feature=====================
-            if opt.model == 'tsm':
-                consensus = ConsensusModule('avg')
-                logit_l = logit_l.view((-1, args.num_segments) + logit_l.size()[1:])
-                logit_ab = logit_ab.view((-1, args.num_segments) + logit_ab.size()[1:])
-                logit_l = consensus(logit_l).squeeze()
-                logit_ab = consensus(logit_ab).squeeze()
+            # if opt.model == 'tsm':
+            #     consensus = ConsensusModule('avg')
+            #     logit_l = logit_l.view((-1, args.num_segments) + logit_l.size()[1:])
+            #     logit_ab = logit_ab.view((-1, args.num_segments) + logit_ab.size()[1:])
+            #     logit_l = consensus(logit_l).squeeze()
+            #     logit_ab = consensus(logit_ab).squeeze()
             # print (output.size()) # [bs, 120]
             loss_x = criterion(logit_l, target)
             loss_y = criterion(logit_ab, target)
 
-            acc1_x, acc5_x = accuracy(output_x, target, topk=(1, 5))
-            acc1_y, acc5_y = accuracy(output_y, target, topk=(1, 5))
+            acc1_x, acc5_x = accuracy(logit_l, target, topk=(1, 5))
+            acc1_y, acc5_y = accuracy(logit_ab, target, topk=(1, 5))
             losses_x.update(loss_x.item(), input_x.size(0))
             losses_y.update(loss_y.item(), input_y.size(0))
-            top1.update(acc1[0], input_x.size(0))
             top1_x.update(acc1_x[0], input_x.size(0))
             top1_y.update(acc1_y[0], input_y.size(0))
-            top5.update(acc5[0], input_x.size(0))
             top5_x.update(acc5_x[0], input_x.size(0))
             top5_y.update(acc5_y[0], input_y.size(0))
 
@@ -517,7 +521,12 @@ def validate(val_loader, model_x, model_y, criterion, opt):
 
 
 def main():
-
+    global best_acc1
+    global best_acc1_x
+    global best_acc1_y
+    best_acc1 = 0
+    best_acc1_x = 0
+    best_acc1_y = 0
     best_loss = 1e3
     # parse the args
     args = parse_option()
@@ -529,13 +538,23 @@ def main():
 
     # set the loader
     unlabeled_loader, n_data = get_dataloaders(args=args, stage='train')
-    labeled_loader, _ = get_dataloaders(args=args, stage='train5') # 5% labeled data
+    labeled_loader, _ = get_dataloaders(args=args, stage='train25') # 5% labeled data
     eval_loader, _ = get_dataloaders(args=args, stage='dev')
     test_loader, _ = get_dataloaders(args=args, stage='test')
-
+    
     # set the model
     model_x, model_y, encoder_x, encoder_y, contrast, criterion_y, criterion_x, criterion = set_model(args, n_data)
-
+    
+    if args.test:
+        # load pre-trained model
+        print('==> loading pre-trained model for testing')
+        ckpt = torch.load(args.test)
+        model_x.load_state_dict(ckpt['model_x']) # rgb
+        model_y.load_state_dict(ckpt['model_y']) # depth
+        print("==> loaded checkpoint for testing'{}' (epoch {})".format(args.test, ckpt['epoch']))
+        print('==> done')
+        top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = validate(test_loader, model_x, model_y, criterion, args)
+        exit()
     # cls_l = nn.Linear(2048, args.num_classes)
     # cls_ab = nn.Linear(2048, args.num_classes)
 
@@ -582,8 +601,10 @@ def main():
 
         time1 = time.time()
         loss, l_loss, ab_loss, top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
-                                        train(epoch, labaled_loader, unlabaled_loader, model_x, model_y, encoder_x, encoder_y, contrast, 
+                                        train(epoch, labeled_loader, unlabeled_loader, model_x, model_y, encoder_x, encoder_y, contrast, 
                                         criterion_x, criterion_y, criterion, optimizer_x, optimizer_y, args)
+        # top1_x, top5_x, losses_x, top1_y, top5_y, losses_y = \
+                                                    # validate(eval_loader, model_x, model_y, criterion, args)
         time2 = time.time()
         print('epoch {} train, total time {:.2f}'.format(epoch, time2 - time1))
 
@@ -652,7 +673,7 @@ def main():
                 'optimizer_y': optimizer_y.state_dict(),
             }
             save_name = '{}_best_rgb.pth'.format(args.model)
-            save_name = os.path.join(args.save_folder, save_name)
+            save_name = os.path.join(args.model_folder, save_name)
             print('saving best rgb model!')
             torch.save(state, save_name)
         
@@ -672,7 +693,7 @@ def main():
                 'optimizer_y': optimizer_y.state_dict(),
             }
             save_name = '{}_best_dep.pth'.format(args.model)
-            save_name = os.path.join(args.save_folder, save_name)
+            save_name = os.path.join(args.model_folder, save_name)
             print('saving best dep model!')
             torch.save(state, save_name)
 
@@ -692,35 +713,9 @@ def main():
                 'optimizer_y': optimizer_y.state_dict(),
             }
             save_name = 'rgbd_ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
-            save_name = os.path.join(args.save_folder, save_name)
+            save_name = os.path.join(args.model_folder, save_name)
             print('saving regular model!')
             torch.save(state, save_name)
-
-        # save model
-        if epoch % args.save_freq == 0:
-            print('==> Saving...')
-            state = {
-                'opt': args,
-                'model_x': model_x.state_dict(),
-                'encoder_x': encoder_x.state_dict(),
-                'model_y': model_y.state_dict(),
-                'encoder_y': encoder_y.state_dict(),
-                'contrast': contrast.state_dict(),
-                'optimizer_x': optimizer_x.state_dict(),
-                'optimizer_y': optimizer_y.state_dict(),
-                'epoch': epoch,
-                # 'cls_l': cls_l.state_dict(),
-                # 'cls_ab': cls_ab.state_dict(),
-                # 'cls_l_optimizer': cls_l_optimizer.state_dict(),
-                # 'cls_ab_optimizer': cls_ab_optimizer.state_dict(),
-            }
-            if args.amp:
-                state['amp'] = amp.state_dict()
-            save_file = os.path.join(args.model_folder, '{task}_epoch_{epoch}.pth'.format(task=args.task, epoch=epoch))    
-            print('saving regular model!')
-            torch.save(state, save_file)
-            # help release GPU memory
-            del state
 
         torch.cuda.empty_cache()
 

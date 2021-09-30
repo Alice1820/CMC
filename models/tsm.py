@@ -476,14 +476,15 @@ class TSN(nn.Module):
         if partial_bn:
             self.partialBN(True)
 
-    def _prepare_tsn(self, num_class):
+    def _prepare_tsn(self, low_dim=128, num_class=120):
         feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
         if self.dropout == 0:
             setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
             self.new_fc = None
         else:
             setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.dropout))
-            self.new_fc = nn.Linear(feature_dim, num_class)
+            self.new_fc = nn.Linear(feature_dim, low_dim)
+        self.classifier = nn.Linear(feature_dim, num_class)
 
         std = 0.001
         if self.new_fc is None:
@@ -493,6 +494,9 @@ class TSN(nn.Module):
             if hasattr(self.new_fc, 'weight'):
                 normal_(self.new_fc.weight, 0, std)
                 constant_(self.new_fc.bias, 0)
+        if hasattr(self.classifier, 'weight'):
+                normal_(self.classifier.weight, 0, std)
+                constant_(self.classifier.bias, 0)
         return feature_dim
 
     def _prepare_base_model(self, base_model):
@@ -661,13 +665,6 @@ class TSN(nn.Module):
     def forward(self, input, no_reshape=False):
         # Changing temporal and channel dim to fit the inflated resnet input requirements
         B, T, W, H, C = input.size()
-        # input = input.view(B, 1, T, W, H, C)
-        # input = input.transpose(1, -1)
-        # input = input.view(B, C, T, W, H)
-        # input = input.transpose(1, 2)
-        # input = input.contiguous()
-        # print (input.size()) # B, T, C, W, H
-        # print (input.size()) # B, T, C, W, H
         if not no_reshape:
             sample_len = (3 if self.modality == "RGB" else 2) * self.new_length
 
@@ -680,18 +677,23 @@ class TSN(nn.Module):
         # print (base_out.size())
         if self.dropout > 0:
             # print (base_out.size())
-            cls_out = self.new_fc(base_out)
+            feat_out = self.new_fc(base_out)
+            cls_out = self.classifier(base_out)
 
         if not self.before_softmax:
+            feat_out = self.softmax(feat_out)
             cls_out = self.softmax(cls_out)
 
         if self.reshape:
             if self.is_shift and self.temporal_pool:
+                feat_out = feat_out.view((-1, self.num_segments // 2) + feat_out.size()[1:])
                 cls_out = cls_out.view((-1, self.num_segments // 2) + cls_out.size()[1:])
             else:
+                feat_out = feat_out.view((-1, self.num_segments) + feat_out.size()[1:])
                 cls_out = cls_out.view((-1, self.num_segments) + cls_out.size()[1:])
-            output = self.consensus(cls_out)
-            return base_out, output.squeeze(1)
+            feat_out = self.consensus(feat_out)
+            cls_out = self.consensus(cls_out)
+            return cls_out.squeeze(1), feat_out.squeeze(1) # feature, logits 128, 120
 
     def _get_diff(self, input, keep_rgb=False):
         input_c = 3 if self.modality in ["RGB", "RGBDiff"] else 2

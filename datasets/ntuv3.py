@@ -260,7 +260,7 @@ def get_dataloaders_v3(args=None, stage='train'):
 
 # %%
 class NTUV3(Dataset):
-    # RGBDI
+    # RGBDI Dataset
     def __init__(self, root_dir='',  # /data0/xifan/NTU_RGBD_60
                  split='cross_subject', # 40 subjects, 3 cameras
                  stage='train',
